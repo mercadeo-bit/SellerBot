@@ -5,11 +5,14 @@ import OpenAI from 'openai';
 
 dotenv.config();
 
+console.log("--------------- ARRANQUE FINAL ---------------");
+
 const app = express();
 app.use(express.json());
 
-// --- CONFIGURACIÓN CRÍTICA ---
-// No definimos IP fija. Dejamos que Railway decida (IPv6/IPv4)
+// 1. CONFIGURACIÓN DEL PUERTO (CRÍTICO)
+// Railway nos da un puerto en process.env.PORT (ej: 8080).
+// Debemos usar ese o 3000 si estamos en local.
 const PORT = process.env.PORT || 3000;
 
 // Variables
@@ -17,50 +20,41 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const KOMMO_TOKEN = process.env.KOMMO_ACCESS_TOKEN;
 const KOMMO_SUBDOMAIN = process.env.KOMMO_SUBDOMAIN;
 
-// Cliente OpenAI
-let openai = null;
-if (OPENAI_API_KEY) {
-    try {
-        openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-        console.log("✅ OpenAI configurado.");
-    } catch (e) {
-        console.error("❌ Error config OpenAI:", e.message);
-    }
-}
+// OpenAI Config
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// 1. Ruta HEALTHCHECK (Ping)
+// 2. Ruta para que Railway sepa que estamos vivos (Healthcheck)
+// Importante: Railway suele revisar la raíz '/' para ver si da 200 OK.
 app.get('/', (req, res) => {
     res.status(200).send('✅ COPACOL AI ONLINE');
 });
 
-// 2. Ruta WEBHOOK
+// 3. Ruta WEBHOOK (Tu lógica de negocio)
 app.post('/webhook', async (req, res) => {
-    res.status(200).send('OK'); // Responder YA para evitar timeout
+    // Respondemos YA para que Kommo no de timeout y para que Railway vea tráfico.
+    res.status(200).send('OK');
 
     try {
         if (!req.body.message) return;
         const data = req.body.message.add ? req.body.message.add[0] : null;
         
         if (data) {
-            console.log(`📩 Mensaje de Lead ${data.lead_id}: "${data.text}"`);
+            console.log(`📩 Lead ${data.lead_id} dice: "${data.text}"`);
             
-            // Lógica OpenAI Simula
-            if (openai) {
-                // Aquí iría el código completo de venta.
-                // Lo simplificamos para asegurar que el server no se caiga primero.
-                console.log("🧠 Procesando con IA (Simulado)...");
-            }
+            // --- AQUÍ CONECTAS LA INTELIGENCIA ---
+            // Solo para confirmar que funciona, hacemos un log de la IA
+            console.log("🧠 Enviando a OpenAI (Simulación activa)...");
+            
+            // Cuando esto esté estable, descomentas tu lógica completa de Function Calling
         }
     } catch (e) {
-        console.error("Error en webhook:", e.message);
+        console.error("❌ Error Webhook:", e.message);
     }
 });
 
-// 3. ARRANQUE UNIVERSAL (FIX FINAL)
-// Quitamos '0.0.0.0' para permitir IPv6 que es lo que usa Railway
-app.listen(PORT, () => {
+// 4. ARRANQUE DEL SERVIDOR (LA SOLUCIÓN)
+// '0.0.0.0' obliga al servidor a escuchar conexiones desde FUERA del contenedor.
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 SERVIDOR LISTO EN PUERTO: ${PORT}`);
+    console.log(`📡 Escuchando en 0.0.0.0 (Visible para Railway)`);
 });
-
-// Manejo de errores para evitar cierres
-process.on('uncaughtException', (err) => console.error('🔥 Error no capturado:', err));
