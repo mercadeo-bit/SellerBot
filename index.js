@@ -8,8 +8,8 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// --- CONFIGURACIÓN DE RED A PRUEBA DE FALLOS ---
-// Usamos el puerto que Railway nos da. Si no nos da ninguno, usamos 3000.
+// --- CONFIGURACIÓN CRÍTICA ---
+// No definimos IP fija. Dejamos que Railway decida (IPv6/IPv4)
 const PORT = process.env.PORT || 3000;
 
 // Variables
@@ -17,37 +17,38 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const KOMMO_TOKEN = process.env.KOMMO_ACCESS_TOKEN;
 const KOMMO_SUBDOMAIN = process.env.KOMMO_SUBDOMAIN;
 
-// Cliente OpenAI (Inicialización perezosa para evitar crash al inicio)
+// Cliente OpenAI
 let openai = null;
 if (OPENAI_API_KEY) {
-    openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-} else {
-    console.error("⚠️ ADVERTENCIA: No se detectó API KEY de OpenAI.");
+    try {
+        openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+        console.log("✅ OpenAI configurado.");
+    } catch (e) {
+        console.error("❌ Error config OpenAI:", e.message);
+    }
 }
 
-// 1. Ruta HEALTHCHECK (Para que Railway sepa que estamos vivos)
+// 1. Ruta HEALTHCHECK (Ping)
 app.get('/', (req, res) => {
     res.status(200).send('✅ COPACOL AI ONLINE');
 });
 
 // 2. Ruta WEBHOOK
 app.post('/webhook', async (req, res) => {
-    // Responder inmediatamente para mantener feliz a Kommo
-    res.status(200).send('OK');
+    res.status(200).send('OK'); // Responder YA para evitar timeout
 
     try {
         if (!req.body.message) return;
-        
-        // Log básico
         const data = req.body.message.add ? req.body.message.add[0] : null;
+        
         if (data) {
-            console.log(`📩 Mensaje entrante: "${data.text}" | Lead ID: ${data.lead_id}`);
+            console.log(`📩 Mensaje de Lead ${data.lead_id}: "${data.text}"`);
             
-            // AQUÍ IRÍA LA LÓGICA DE OPENAI
-            // Por ahora, solo queremos que el servidor NO se apague.
+            // Lógica OpenAI Simula
             if (openai) {
-                // Simulación de proceso sin bloquear el hilo principal
-                console.log("🧠 Enviando a OpenAI (Simulado para estabilidad)...");
+                // Aquí iría el código completo de venta.
+                // Lo simplificamos para asegurar que el server no se caiga primero.
+                console.log("🧠 Procesando con IA (Simulado)...");
             }
         }
     } catch (e) {
@@ -55,23 +56,11 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// 3. ARRANQUE DEL SERVIDOR
-const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 SERVIDOR INICIADO EN PUERTO: ${PORT}`);
-    console.log(`📡 Escuchando en 0.0.0.0 (Universal)`);
+// 3. ARRANQUE UNIVERSAL (FIX FINAL)
+// Quitamos '0.0.0.0' para permitir IPv6 que es lo que usa Railway
+app.listen(PORT, () => {
+    console.log(`🚀 SERVIDOR LISTO EN PUERTO: ${PORT}`);
 });
 
-// 4. PREVENCIÓN DE CIERRE (Keep-Alive)
-// Esto evita que el servidor se muera si recibe una señal extraña
-process.on('SIGTERM', () => {
-    console.log('🛑 Recibida señal SIGTERM, pero intentando mantener conexiones...');
-    // No cerramos el servidor inmediatamente, dejamos que Railway decida cuándo matar
-    server.close(() => {
-        console.log('Servidor cerrado correctamente.');
-    });
-});
-
-process.on('uncaughtException', (err) => {
-    console.error('🔥 ERROR NO CAPTURADO:', err);
-    // No salimos del proceso (process.exit) para intentar sobrevivir
-});
+// Manejo de errores para evitar cierres
+process.on('uncaughtException', (err) => console.error('🔥 Error no capturado:', err));
