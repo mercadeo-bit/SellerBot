@@ -64,3 +64,15 @@ async function responderKommo(lead_id, texto) {
 console.log(`🗨️ RESPUESTA A ENVIAR:
 ${texto}`);
 }
+
+async function obtenerHistorialChat(leadId) {
+    try {
+        console.log(`[INFO] Obteniendo historial para lead: ${leadId}`);
+        // POR AHORA: Retornamos lista vacía para que no falle el servidor.
+        // En el futuro aquí conectaremos con la API de Kommo para leer notas anteriores.
+        return []; 
+    } catch (error) {
+        console.error("Error al obtener historial, continuamos sin él:", error);
+        return [];
+    }
+}
