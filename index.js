@@ -1,128 +1,150 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import axios from 'axios';
-import qs from 'qs'; 
 import { getAccessToken } from './src/kommoAuth.js';
 import { analizarMensaje } from './src/openaiService.js';
 
 dotenv.config();
 const app = express();
-
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+
+// Helpers de espera
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
-    // 📨 Responder OK de inmediato
-    res.status(200).send('OK'); 
-    
+    res.status(200).send('OK'); // Responder siempre OK rápido
+
     try {
         const body = req.body;
-        
-        // 🔍 RAYOS X: Imprimir todo lo que llegue para depurar
-        console.log("📨 RAW PAYLOAD:", JSON.stringify(body, null, 2));
+        // Imprimir raw para debug
+        // console.log("📨 Payload:", JSON.stringify(body, null, 2));
 
         // ------------------------------------------------------
-        // EVENTO 1: MENSAJE ENTRANTE (Aquí está el Chat ID)
+        // ESTRATEGIA 1: MENSAJE DIRECTO (La mejor opción)
         // ------------------------------------------------------
         if (body.message && body.message.add) {
             const msg = body.message.add[0];
-            console.log(`💬 MESSAGE EVENT DETECTED! ID: ${msg.chat_id}, Type: ${msg.type}`);
-
-            // Solo respondemos a mensajes del cliente (incoming)
             if (msg.type === 'incoming') {
-                // msg.entity_id suele ser el Lead ID en WhatsApp
-                await processMessageEvent(msg.entity_id, msg.chat_id, msg.text);
-            } else {
-                console.log("Ignored: Message type is not incoming.");
+                console.log(`💬 MESSAGE EVENT: ${msg.chat_id}`);
+                await processReply(msg.entity_id, msg.chat_id, msg.text);
+                return;
             }
-            return; // Ya procesamos, salimos.
         }
 
         // ------------------------------------------------------
-        // EVENTO 2: LEAD CREADO (Solo informativo por ahora)
+        // ESTRATEGIA 2: LEAD CREADO (El Plan B robusto)
         // ------------------------------------------------------
         if (body.leads && body.leads.add) {
-            console.log("🔔 Lead Created Event received. Waiting for Message Event...");
+            const lead = body.leads.add[0];
+            const leadId = lead.id;
+            console.log(`🔔 LEAD CREATED: ${leadId}. Hunting for Chat ID...`);
+
+            // Esperar 3 segundos a que Kommo guarde la nota del mensaje
+            await sleep(3000);
+
+            // Buscar el Chat ID en las notas
+            const result = await getChatDataFromNotes(leadId);
+            
+            if (result && result.chatId) {
+                console.log(`✅ FOUND CHAT ID IN NOTES: ${result.chatId}`);
+                const textoMensaje = result.text || "Hola (Nuevo Lead)";
+                await processReply(leadId, result.chatId, textoMensaje);
+            } else {
+                console.log("⚠️ Could not find chat_id in Lead Notes.");
+            }
         }
 
     } catch (err) {
-        console.error('❌ Webhook Handler Error:', err.message);
+        console.error('❌ Error:', err.message);
     }
 });
 
-async function processMessageEvent(leadId, chatId, messageText) {
+// Lógica Principal de Respuesta
+async function processReply(leadId, chatId, incomingText) {
     try {
         const token = await getAccessToken();
 
-        // 1. Verificar Pipeline y Status
-        // Necesitamos confirmar que el mensaje es de un lead en la columna correcta
-        // A veces entity_id en mensajes es el Lead ID. Validemos.
-        let leadUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`;
-        
-        // Si leadId falla (a veces es contact_id), intentamos resolverlo
-        // Pero primero probemos directo:
-        try {
-            const leadRes = await axios.get(leadUrl, { headers: { Authorization: `Bearer ${token}` } });
-            const leadData = leadRes.data;
+        // Verificar Filtros (Pipeline, Estado)
+        const leadRes = await axios.get(`https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`, { 
+            headers: { Authorization: `Bearer ${token}` } 
+        });
+        const leadData = leadRes.data;
 
-            // Filtros de Seguridad
-            if (String(leadData.pipeline_id) !== String(process.env.PIPELINE_ID_VENTAS)) {
-                console.log(`🛑 Message ignored: Lead in wrong pipeline (${leadData.pipeline_id}).`);
-                return;
-            }
-            
-            // Verifica que esté en "Entrada / Nuevo Lead" (o la columna que desees)
-            if (String(leadData.status_id) !== String(process.env.STATUS_ID_ENTRANTES)) {
-                console.log(`🛑 Message ignored: Status is ${leadData.status_id}. Waiting for ${process.env.STATUS_ID_ENTRANTES}.`);
-                return;
-            }
-
-        } catch (error) {
-            console.log("⚠️ Could not fetch Lead info from entity_id. Is this a Contact ID?", error.message);
-            // Si quieres que responda igual aunque falle la verificación, comenta el return.
-            // return; 
+        // Opcional: Validar Pipeline (Si quieres responder a TODOS, comenta esto)
+        /*
+        if (String(leadData.pipeline_id) !== String(process.env.PIPELINE_ID_VENTAS)) {
+            console.log("🛑 Wrong Pipeline. Ignoring.");
+            return;
         }
+        */
 
-        console.log(`✅ AI ACTIVATED for Chat ${chatId}`);
-
-        // 2. Procesar con IA
-        // (Aquí podrías pasar historial previo si lo tuvieras)
+        console.log(`🤖 AI Thinking for Chat ${chatId}...`);
+        
+        // Consultar OpenAI
         const context = []; 
-        const aiResponse = await analizarMensaje(context, messageText);
+        const aiResponse = await analizarMensaje(context, incomingText);
 
-        // 3. Responder
+        // Responder
         if (aiResponse.tool_calls) {
             const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
-            console.log("💾 AI Tool Args:", args);
-            await sendReply(chatId, "Recibido. Un asesor validará la información.", token);
-            // Lógica de cambio de estado (Opcional)
+            console.log("💾 Saving Data:", args);
+            await sendReply(chatId, "¡Datos recibidos! Gracias.", token);
+            // Mover
             if(process.env.STATUS_ID_DESPACHO) await changeStatus(leadId, process.env.STATUS_ID_DESPACHO, token);
-
         } else {
             await sendReply(chatId, aiResponse.content, token);
-            // Mover a "Cualificando"
+            // Mover a Cualificando
             if(process.env.STATUS_ID_CUALIFICANDO) await changeStatus(leadId, process.env.STATUS_ID_CUALIFICANDO, token);
         }
 
-    } catch (error) {
-        console.error("❌ Logic Error:", error.message);
+    } catch (e) {
+        console.error("❌ Process Reply Error:", e.message);
     }
+}
+
+// 🕵️ CAZADOR DE NOTAS (Recupera Chat ID de los metadatos)
+async function getChatDataFromNotes(leadId) {
+    try {
+        const token = await getAccessToken();
+        const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}/notes`;
+        const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
+        
+        const notes = res.data._embedded?.notes || [];
+        
+        // Buscar en orden cronológico inverso (última nota primero)
+        for (const note of notes.reverse()) {
+            // Nota tipo: Mensaje Entrante
+            if (note.note_type === 'message_in' || note.note_type === 4) {
+                // A veces está en params
+                if (note.params && note.params.chat_id) {
+                    return { chatId: note.params.chat_id, text: note.params.text };
+                }
+            }
+            // Buscar en Service Message (common)
+            if (note.params && (note.params.service === 'WhatsApp' || note.params.service === 'com.amocrm.amocrmwa')) {
+               if (note.params.chat_id) return { chatId: note.params.chat_id, text: "Nuevo mensaje" };
+            }
+        }
+    } catch (e) {
+        console.log("❌ Notes Hunt Failed:", e.message);
+    }
+    return null;
 }
 
 async function sendReply(chatId, text, token) {
     if (!text) return;
     try {
-        console.log(`📤 Sending to ${chatId}...`);
         await axios.post(
             `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks/chats/${chatId}/messages`,
             { text: text },
             { headers: { Authorization: `Bearer ${token}` } }
         );
-        console.log(`✅ REPLY SENT SUCCESS!`);
+        console.log(`✅ MESSAGE SENT!`);
     } catch (e) {
-        console.error("❌ Send Failed:", e.response?.data || e.message);
+        console.error("❌ Send Failed:", e.message);
     }
 }
 
@@ -133,14 +155,12 @@ async function changeStatus(leadId, statusId, token) {
             { status_id: parseInt(statusId) },
             { headers: { Authorization: `Bearer ${token}` } }
         );
-        console.log(`➡️ Status Updated to ${statusId}`);
-    } catch (e) {
-        console.error("❌ Status Error:", e.message);
-    }
+        console.log(`➡️ Status Moved.`);
+    } catch (e) {}
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`🚀 Bot ready on port ${PORT}`);
-    try { await getAccessToken(); console.log("✅ Auth Ready"); } catch (e) {}
+    try { await getAccessToken(); console.log("✅ Verified."); } catch (e) {}
 });
