@@ -108,15 +108,19 @@ async function processLead(leadId) {
 async function sendReply(contactId, text, token) {
     if (!text) return;
     try {
-        // 🛠 FIX: Change URL to ask for contact WITH chats included
+        console.log(`🔍 Fetching Chat info for Contact ${contactId}...`);
+        
+        // Petición al contacto incluyendo los chats
         const chatUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/${contactId}?with=chats`;
         const chatRes = await axios.get(chatUrl, { headers: { Authorization: `Bearer ${token}` } });
         
-        // Check if there are any embedded chats
+        // 🚨 IMPRIMIR TODO LO QUE DEVUELVE KOMMO (Para encontrar el ID)
+        // Esto aparecerá en tus logs y nos dirá la verdad
+        console.log("📄 CONTACT DATA DUMP:", JSON.stringify(chatRes.data._embedded, null, 2));
+
         const chats = chatRes.data._embedded?.chats;
 
         if (chats && chats.length > 0) {
-            // Usually the last updated chat is the active one
             const chatId = chats[0].chat_id;
             console.log(`💬 Found Chat ID: ${chatId}`);
 
@@ -127,7 +131,7 @@ async function sendReply(contactId, text, token) {
             );
             console.log(`✅ Message Sent to Chat ${chatId}`);
         } else {
-            console.log("⚠️ No Active Chat found for this contact (Maybe it was a phone lead, not WhatsApp?)");
+            console.log("⚠️ NO ACTIVE CHAT FOUND. The 'chats' array is empty or undefined.");
         }
     } catch (e) {
         console.error("❌ Send Message Error:", e.response?.data || e.message);
