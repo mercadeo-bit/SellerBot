@@ -14,10 +14,7 @@ app.use(express.json());
 app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
-    // 📨 Instant 200 OK (Per Protocol 5.1 - High Availability)
     res.status(200).send('OK'); 
-    
-    // Log minimal info
     console.log("📨 Payload Received"); 
 
     try {
@@ -26,14 +23,13 @@ app.post('/webhook', async (req, res) => {
         // 1. LEAD MOVED (Status Change)
         if (body.leads && body.leads.status) {
             const lead = body.leads.status[0];
-            // Ensure ID comparison matches string/int formats
             if (String(lead.status_id) === String(process.env.STATUS_ID_ENTRANTES)) {
                 console.log(`🔔 Lead ${lead.id} moved to INCOMING. Processing...`);
                 await processLead(lead.id);
             }
         }
         
-        // 2. LEAD CREATED (New Message)
+        // 2. LEAD CREATED
         if (body.leads && body.leads.add) {
             const lead = body.leads.add[0];
             if (lead.id) {
@@ -51,72 +47,71 @@ async function processLead(leadId) {
     try {
         const token = await getAccessToken();
 
-        // 1. Get Lead to find Contact ID
+        // 1. Get Lead and Contact
         const leadUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}?with=contacts`;
         const leadRes = await axios.get(leadUrl, { headers: { Authorization: `Bearer ${token}` } });
         const leadData = leadRes.data;
 
-        // Security Pipeline Check
         if (String(leadData.pipeline_id) !== String(process.env.PIPELINE_ID_VENTAS)) {
             console.log(`🛑 Wrong Pipeline. Got ${leadData.pipeline_id}`);
             return;
         }
 
         const contactId = leadData._embedded?.contacts?.[0]?.id;
-        if (!contactId) return console.log("❌ Lead has no contact.");
-
+        if (!contactId) return console.log("❌ Lead has no contact attached.");
         console.log(`👤 Contact ID: ${contactId}`);
 
-        // 2. RETRIEVE CHAT ID (Implementing Gemini Protocol 3.1)
-        const chatId = await getChatIdUsingDedicatedEndpoint(contactId, token);
+        // 2. RETRIEVE CHAT ID (STRATEGY D: FILTER TALKS)
+        const chatId = await findChatViaTalks(contactId, token);
 
         if (!chatId) {
-            console.log("⚠️ CRITICAL: Chat ID not found even with dedicated endpoint.");
+            console.log("⚠️ CRITICAL: No conversations found for this contact.");
             return;
         }
 
         console.log(`💬 CHAT ID SECURED: ${chatId}`);
 
-        // 3. OpenAI Processing
+        // 3. AI Processing
         const context = []; 
-        const incomingMessage = "Hola (Lead Entrante)"; 
+        const incomingMessage = "Hola (Trigger automático)"; 
         const aiResponse = await analizarMensaje(context, incomingMessage);
 
-        // 4. Send Reply & Move
+        // 4. Send Reply
         if (aiResponse.tool_calls) {
             await sendReply(chatId, "¡Datos guardados!", token);
-            // Move Status
             if(process.env.STATUS_ID_DESPACHO) await changeStatus(leadId, process.env.STATUS_ID_DESPACHO, token);
         } else {
             await sendReply(chatId, aiResponse.content, token);
-            // Move Status
             if(process.env.STATUS_ID_CUALIFICANDO) await changeStatus(leadId, process.env.STATUS_ID_CUALIFICANDO, token);
         }
 
     } catch (error) {
-        console.error("❌ Logic Error:", error.message);
+        console.error("❌ Process Lead Error:", error.message);
     }
 }
 
-// 🔥 THE GEMINI FIX (Protocol 3.1)
-async function getChatIdUsingDedicatedEndpoint(contactId, token) {
+// 🔥 STRATEGY D: Filter Talks by Entity
+async function findChatViaTalks(contactId, token) {
     try {
-        console.log(`🔎 Polling dedicated endpoint: /api/v4/contacts/chats?contact_id=${contactId}`);
+        // Query the "Talks" endpoint asking: "Give me conversations linked to this contact"
+        console.log(`🔎 Polling /api/v4/talks for contact ${contactId}...`);
         
-        // This is the "Secret Weapon" endpoint
-        const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/chats?contact_id=${contactId}`;
+        const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks?filter[entity_type]=contact&filter[entity_id]=${contactId}`;
         const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
 
-        // Kommo returns an array of chat links
-        const chatLinks = res.data._embedded?.chats;
+        const talks = res.data._embedded?.talks;
 
-        if (chatLinks && chatLinks.length > 0) {
-            // Usually the first one is the active link. 
-            // The Research confirms 'chat_id' (UUID) is here.
-            return chatLinks[0].chat_id;
+        if (talks && talks.length > 0) {
+            // Talk objects contain the 'chat_id' (UUID) we need
+            // usually in talks[0].chat_id
+            const chatUUID = talks[0].chat_id;
+            console.log(`✅ FOUND Chat ID via Talks: ${chatUUID}`);
+            return chatUUID;
+        } else {
+            console.log("⚠️ /api/v4/talks returned empty list. No active conversation.");
         }
     } catch (e) {
-        console.log("❌ Failed to get Chat Links:", e.message);
+        console.log("❌ Failed polling Talks:", e.response?.data || e.message);
     }
     return null;
 }
@@ -124,9 +119,6 @@ async function getChatIdUsingDedicatedEndpoint(contactId, token) {
 async function sendReply(chatId, text, token) {
     if (!text) return;
     try {
-        // We use the Simple Structure. 
-        // If this fails later, we will implement Protocol 4.3 (Complex Structure),
-        // but for now, 90% of WhatsApp Lite integrations work with this.
         await axios.post(
             `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks/chats/${chatId}/messages`,
             { text: text },
