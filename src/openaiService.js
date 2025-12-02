@@ -3,22 +3,17 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const openai = new OpenAI({
-    apiKey: process.env.OPENAI_KEY
+    apiKey: process.env.OPENAI_API_KEY // UPDATED NAME
 });
 
 const SYSTEM_PROMPT = `
-Eres Sofía, asesora digital de COPACOL. Tu meta es asesorar y cerrar ventas ferreteras creando alianzas.
-TONO: Cálido, empático, profesional, optimista.
+Eres Sofía, asesora digital de COPACOL. 
+OBJETIVO: Calificar leads y cerrar ventas.
+IDIOMA: Español.
 REGLAS:
-- Siempre saluda por el nombre si lo conoces.
-- Preséntate: "Te escribe Sofía, asesora digital de COPACOL".
-- Explica técnicamente (marcas, calidades, presión).
-- Cierra con preguntas que lleven al sí.
-- Emojis permitidos (máx 2): 🙏🏽, 👌🏽, 💪🏽, 🙂, 🤝.
-- Estructura: Alianza → Diagnóstico → Propuesta → Cierre.
-- Prioriza marca Furius.
-- IDIOMA: Responde en Español.
-- MENSAJES CORTOS: Estás en WhatsApp, no escribas párrafos largos.
+- Respuesta CORTA (ideales para WhatsApp).
+- Tono amable y profesional.
+- Si piden despacho, pregunta ciudad y datos antes de llamar a la función.
 `;
 
 const tools = [
@@ -26,17 +21,15 @@ const tools = [
         type: "function",
         function: {
             name: "update_delivery_info",
-            description: "Extrae datos del cliente para preparar despacho cuando el cliente confirme la compra.",
+            description: "Guardar datos de despacho cuando el cliente confirme la compra.",
             parameters: {
                 type: "object",
                 properties: {
-                    ms_nombre_completo: { type: "string" },
-                    ms_documento_numero: { type: "string" },
-                    ms_direccion_exacta: { type: "string" },
-                    ms_ciudad: { type: "string" },
-                    ms_telefono: { type: "string" }
+                    cedula: { type: "string" },
+                    direccion: { type: "string" },
+                    ciudad: { type: "string" }
                 },
-                required: ["ms_nombre_completo", "ms_telefono"]
+                required: ["direccion", "ciudad"]
             }
         }
     }
@@ -44,21 +37,20 @@ const tools = [
 
 export async function analizarMensaje(contexto, mensajeUsuario) {
     try {
-        const completion = await openai.chat.completions.create({
-            model: "gpt-4-turbo", // Better for complex sales logic
+        const response = await openai.chat.completions.create({
+            model: "gpt-4-turbo", // or gpt-3.5-turbo if you prefer cost savings
             messages: [
                 { role: "system", content: SYSTEM_PROMPT },
-                ...contexto, // History of previous chat
+                ...contexto,
                 { role: "user", content: mensajeUsuario }
             ],
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.7,
+            temperature: 0.5,
         });
-
-        return completion.choices[0].message;
+        return response.choices[0].message;
     } catch (error) {
-        console.error("❌ OpenAI Error:", error);
-        return { content: "Lo siento, tuve un error técnico. ¿Me repites?" };
+        console.error("❌ OpenAI API Error:", error);
+        return { content: "Estoy experimentando un problema técnico. ¿Me repites?" };
     }
 }

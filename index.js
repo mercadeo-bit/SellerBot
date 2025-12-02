@@ -1,163 +1,130 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import axios from 'axios';
-import qs from 'qs'; // Needed for Kommo Webhooks
+import qs from 'qs'; 
 import { getAccessToken } from './src/kommoAuth.js';
 import { analizarMensaje } from './src/openaiService.js';
 
 dotenv.config();
 const app = express();
 
-// Middleware to parse Kommo's weird formatting
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-app.get('/', (req, res) => res.send('Copacol AI Server is Running 🚀'));
+app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
 
-// WEBHOOK ENDPOINT
 app.post('/webhook', async (req, res) => {
-    // 1. Immediately respond 200 to Kommo so it doesn't retry
-    res.status(200).send('OK');
+    res.status(200).send('OK'); // Always reply OK to Kommo fast
 
     try {
         const body = req.body;
-        console.log("📨 Webhook received");
+        // console.log("📨 Payload:", JSON.stringify(body, null, 2)); // Enable for debugging
 
-        // DETECT LEAD STATUS CHANGE (Incoming Pipeline)
+        // CHECK 1: Incoming Lead Status Change
         if (body.leads && body.leads.status) {
-            const leadData = body.leads.status[0];
-            const leadId = leadData.id;
-            const newStatusId = leadData.status_id;
-            const pipelineId = leadData.pipeline_id;
-
-            // Only run if it's the specific Pipeline and "Leads Entrantes" status
-            if (pipelineId == process.env.PIPELINE_ID && newStatusId == process.env.STATUS_INCOMING) {
-                console.log(`⚡ Processing Lead ${leadId} in Incoming Status`);
-                await procesarLeadEntrante(leadId);
+            const lead = body.leads.status[0];
+            
+            // Check if pipeline matches VENTAS and Status is ENTRANTES
+            if (lead.pipeline_id == process.env.PIPELINE_ID_VENTAS && 
+                lead.status_id == process.env.STATUS_ID_ENTRANTES) {
+                
+                console.log(`🔔 Lead ${lead.id} detected in Incoming. Processing...`);
+                await processLead(lead.id);
             }
-        } 
+        }
         
-        // DETECT NEW UNSORTED (New Chats often land here first)
-        // If you set up the hook on "Unsorted", this handles it.
-        else if (body.leads && body.leads.add) {
-             const leadData = body.leads.add[0];
-             // Logic can be similar, depends on your Webhook setup
-             console.log(`⚡ New Lead Added: ${leadData.id}`);
-             // Check status/pipeline logic here if needed
+        // CHECK 2: New Lead (Optional, if you have webhooks on "add")
+        if (body.leads && body.leads.add) {
+            const lead = body.leads.add[0];
+            // If new leads land in Entrantes directly
+             if (lead.pipeline_id == process.env.PIPELINE_ID_VENTAS) {
+                 await processLead(lead.id);
+             }
         }
 
     } catch (err) {
-        console.error('❌ Webhook Logic Error:', err);
+        console.error('❌ Webhook Handler Error:', err);
     }
 });
 
-async function procesarLeadEntrante(leadId) {
+async function processLead(leadId) {
     const token = await getAccessToken();
-    
-    // 1. Get Lead Details (We need to find the chat/contact info)
+
+    // 1. Get contact info
     const leadUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}?with=contacts`;
-    const leadInfo = await axios.get(leadUrl, { headers: { Authorization: `Bearer ${token}` } });
+    const leadRes = await axios.get(leadUrl, { headers: { Authorization: `Bearer ${token}` } });
     
-    // Get the most recent contact to find the Chat ID
-    const contactId = leadInfo.data._embedded.contacts[0]?.id;
-    if(!contactId) {
-        console.log("❌ No contact found for lead.");
-        return;
-    }
+    const contactId = leadRes.data._embedded.contacts?.[0]?.id;
+    if (!contactId) return console.log("❌ Lead has no contact.");
 
-    // 2. Get Contact Info to find Chat ID (Conversation ID)
-    const contactUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/${contactId}`;
-    const contactRes = await axios.get(contactUrl, { headers: { Authorization: `Bearer ${token}` } });
-    
-    // Attempt to grab the last message or custom logic
-    // Usually, the "Last Message" isn't fully in the contact, we might need the Chat History
-    // For this MVP, we will try to reply to the lead's associated chat.
-    
-    // We assume the input text is the "last message" stored in metadata or we fetch the chat.
-    // Simplifying: Let's assume we reply to the Initial Inquiry.
-    const messageInput = "Hola, estoy interesado."; // If possible, fetch real last msg from Chat API
-    
-    // 3. AI Processing
-    // History context can be empty for the very first message
-    const respuestaAI = await analizarMensaje([], messageInput); 
+    // 2. Fetch Chat History / Context (Mocked for now)
+    // To make this real, we would fetch /api/v4/contacts/{id}/chats
+    const context = []; 
+    const incomingMessage = "Hola, me interesa info."; // Ideally fetch real last message
 
-    // 4. Execution
-    if (respuestaAI.tool_calls) {
-        // AI wants to update fields (Closing)
-        const args = JSON.parse(respuestaAI.tool_calls[0].function.arguments);
-        console.log("🛠 Updating Lead Info:", args);
-        await actualizarCamposKommo(leadId, args, token);
-        await responderKommo(contactId, respuestaAI.content || "Datos actualizados, gracias.", token);
+    // 3. Ask OpenAI
+    const aiResponse = await analizarMensaje(context, incomingMessage);
+
+    // 4. Handle Tools or Text
+    if (aiResponse.tool_calls) {
+        const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
+        console.log("💾 Saving Data:", args);
         
-        // Final move? Depends on your flow. Maybe keep it there or move to "Ready".
+        // Update Custom Fields (Mapped to your vars)
+        await updateFields(leadId, args, token);
+        
+        // Reply confirmation
+        await sendReply(contactId, "¡Listo! He guardado tus datos de despacho. Procederemos...", token);
+        
+        // Move to Despacho or Won?
+        await changeStatus(leadId, process.env.STATUS_ID_DESPACHO, token);
     } else {
-        // Normal text response
-        await responderKommo(contactId, respuestaAI.content, token);
+        // Just text reply
+        await sendReply(contactId, aiResponse.content, token);
         
-        // 5. MOVE TO "QUALIFYING" STAGE
-        await moverEtapa(leadId, token);
+        // Move to "Cualificando" (Next Stage)
+        await changeStatus(leadId, process.env.STATUS_ID_CUALIFICANDO, token);
     }
 }
 
-async function responderKommo(contactId, texto, token) {
-    if (!texto) return;
-
-    // To send a WhatsApp message, we typically use the Chat API
-    // GET /api/v4/contacts/{id}/chats to find the Chat ID
-    
+async function sendReply(contactId, text, token) {
+    if (!text) return;
     try {
-        // Step A: Find the Chat ID for this contact
-        const chatListUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/${contactId}/chats`;
-        const chatRes = await axios.get(chatListUrl, { headers: { Authorization: `Bearer ${token}` } });
-        
-        // This relies on the contact having an active chat (Woo/WhatsApp)
-        const chatId = chatRes.data._embedded?.chats[0]?.chat_id;
+        // Find Chat ID
+        const chatUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/${contactId}/chats`;
+        const chatRes = await axios.get(chatUrl, { headers: { Authorization: `Bearer ${token}` } });
+        const chatId = chatRes.data._embedded?.chats?.[0]?.chat_id;
 
         if (chatId) {
-             const sendUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks/chats/${chatId}/messages`;
-             const payload = {
-                 text: texto,
-                 // attachment: ... if needed
-             };
-             await axios.post(sendUrl, payload, { headers: { Authorization: `Bearer ${token}` } });
-             console.log(`✅ Message sent to Chat ${chatId}`);
-        } else {
-             console.log("⚠️ No Active Chat ID found. Cannot reply via WA.");
+            await axios.post(
+                `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks/chats/${chatId}/messages`,
+                { text: text },
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            console.log("✅ Reply Sent to WhatsApp.");
         }
     } catch (e) {
-        console.error("❌ Failed to send message:", e.response?.data || e.message);
+        console.error("❌ Send Message Error:", e.response?.data || e.message);
     }
 }
 
-async function moverEtapa(leadId, token) {
-    const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`;
+async function changeStatus(leadId, statusId, token) {
     try {
-        await axios.patch(url, { 
-            status_id: parseInt(process.env.STATUS_QUALIFYING),
-            pipeline_id: parseInt(process.env.PIPELINE_ID) 
-        }, {
-            headers: { Authorization: `Bearer ${token}` }
-        });
-        console.log(`🚚 Lead ${leadId} moved to Qualifying`);
+        await axios.patch(
+            `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`,
+            { status_id: parseInt(statusId) },
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+        console.log(`➡️ Lead moved to Status ${statusId}`);
     } catch (e) {
-        console.error("❌ Error moving stage:", e.response?.data);
+        console.error("❌ Status Change Error:", e.message);
     }
 }
 
-async function actualizarCamposKommo(leadId, args, token) {
-    const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`;
-    // You need to map "ms_nombre_completo" to the REAL ID in Kommo (e.g. 123456)
-    // For now, this is a placeholder mapping logic
-    /* 
-    const body = {
-        custom_fields_values: [
-            { field_id: 123456, values: [{ value: args.ms_nombre_completo }] }
-        ]
-    };
-    await axios.patch(url, body, ...);
-    */
-    console.log("Mock Update Fields: ", args);
+async function updateFields(leadId, data, token) {
+    // Implement field update using FIELD_ID_CEDULA etc from your vars
+    console.log("Update logic goes here using", process.env.FIELD_ID_CEDULA);
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Bot listening on port ${PORT}`));
