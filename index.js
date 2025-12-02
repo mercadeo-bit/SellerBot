@@ -15,26 +15,29 @@ app.use(express.json());
 app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
-    // 📨 Log rápido para confirmar que llegó algo
-    console.log("📨 Payload Received"); 
+    // 📨 Responder rápido a Kommo para evitar timeouts
     res.status(200).send('OK'); 
+    
+    // Log para confirmar recepción
+    console.log("📨 Payload Received"); 
 
     try {
         const body = req.body;
         
-        // DETECTOR 1: CAMBIO DE ESTADO
+        // DETECTOR 1: CAMBIO DE ESTADO (Arrastrar Lead)
         if (body.leads && body.leads.status) {
             const lead = body.leads.status[0];
+            // Verificar si entró al estado deseado
             if (String(lead.status_id) === String(process.env.STATUS_ID_ENTRANTES)) {
                 console.log(`🔔 Lead ${lead.id} moved to INCOMING. Starting process...`);
                 await processLead(lead.id);
             }
         }
         
-        // DETECTOR 2: LEAD CREADO
+        // DETECTOR 2: LEAD CREADO (Nuevo mensaje entrante)
         if (body.leads && body.leads.add) {
             const lead = body.leads.add[0];
-            // Procesamos si viene con ID (asumimos que el webhook está en la columna correcta)
+            // Solo si tiene ID (asumiendo que el webhook está filtrado por columna en Kommo)
             if (lead.id) {
                 console.log(`🔔 New Lead ${lead.id} detected. Starting process...`);
                 await processLead(lead.id);
@@ -50,12 +53,12 @@ async function processLead(leadId) {
     try {
         const token = await getAccessToken();
 
-        // 1. Obtener datos del Lead y Contacto
+        // 1. Obtener datos del Lead
         const leadUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}?with=contacts`;
         const leadRes = await axios.get(leadUrl, { headers: { Authorization: `Bearer ${token}` } });
         const leadData = leadRes.data;
 
-        // Verificar Pipeline (usamos String para evitar errores de tipo número/texto)
+        // Verificar Pipeline
         if (String(leadData.pipeline_id) !== String(process.env.PIPELINE_ID_VENTAS)) {
             console.log(`🛑 Wrong Pipeline. Got ${leadData.pipeline_id}, expected ${process.env.PIPELINE_ID_VENTAS}`);
             return;
@@ -66,37 +69,35 @@ async function processLead(leadId) {
 
         console.log(`👤 Contact ID Found: ${contactId}`);
 
-        // 2. BUSCAR EL CHAT ID (ESTRATEGIA DOBLE)
-        // Intento A: Preguntar al contacto
-        // Intento B: Buscar en eventos del lead (Backdoor)
-        
+        // 2. BUSCAR EL CHAT ID (TRIPLE ESTRATEGIA)
         const chatId = await findChatId(contactId, leadId, token);
 
         if (!chatId) {
-            console.log("⚠️ CRITICAL: Could not find ANY Chat ID for this lead. Is it a real WhatsApp lead?");
+            console.log("⚠️ CRITICAL: Could not find Chat ID. The bot cannot reply.");
             return;
         }
 
-        // 3. Inteligencia Artificial
-        const context = []; // TODO: Historial
-        const incomingMessage = "Hola (Trigger automático)"; 
+        // 3. Inteligencia Artificial (TODO: Pasar historial real en el futuro)
+        const context = []; 
+        const incomingMessage = "Hola (Trigger automático de estado)"; 
 
         const aiResponse = await analizarMensaje(context, incomingMessage);
 
-        // 4. Responder
+        // 4. Responder y Mover
         if (aiResponse.tool_calls) {
             const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
             console.log("💾 Saving Data:", args);
             
-            await sendReply(chatId, "¡Datos recibidos! Un asesor te contactará.", token);
+            await sendReply(chatId, "¡Datos recibidos! Procederemos con el despacho.", token);
             
             if(process.env.STATUS_ID_DESPACHO) {
                 await changeStatus(leadId, process.env.STATUS_ID_DESPACHO, token);
             }
         } else {
+            console.log(`🤖 AI sending reply...`);
             await sendReply(chatId, aiResponse.content, token);
             
-            // Mover etapa
+            // Mover a etapa "Cualificando" para evitar bucles
             if(process.env.STATUS_ID_CUALIFICANDO) {
                 await changeStatus(leadId, process.env.STATUS_ID_CUALIFICANDO, token);
             }
@@ -104,43 +105,66 @@ async function processLead(leadId) {
 
     } catch (error) {
         console.error("❌ Process Lead Error:", error.message);
-        if (error.response) console.error("API Error Detail:", error.response.data);
     }
 }
 
-// 🔥 LA NUEVA FUNCIÓN BUSCADORA
+// 🔥 FUNCIÓN DE BÚSQUEDA MEJORADA (NOTES + EVENTS)
 async function findChatId(contactId, leadId, token) {
-    // ESTRATEGIA A: Contacto directo
+    
+    // ESTRATEGIA A: Preguntar al Contacto directamente
     try {
-        console.log("🔎 Hunting Chat ID via Contact...");
-        const chatUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/${contactId}?with=chats`;
-        const res = await axios.get(chatUrl, { headers: { Authorization: `Bearer ${token}` } });
-        
+        const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/${contactId}?with=chats`;
+        const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
         if (res.data._embedded?.chats?.length > 0) {
             const id = res.data._embedded.chats[0].chat_id;
             console.log(`✅ Found Chat ID via Contact: ${id}`);
             return id;
         }
-    } catch(e) { console.log("Failed Strategy A"); }
+    } catch(e) {}
 
-    // ESTRATEGIA B: Historial de Eventos (Plan B)
+    // ESTRATEGIA C (NUEVA): Buscar en las NOTAS del Lead (Mensajes = Notas)
     try {
-        console.log("🔎 Hunting Chat ID via Lead Events...");
-        // Buscamos eventos de "Mensaje entrante" (incoming_chat_message)
-        const eventUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&filter[type]=chat_message`;
-        const res = await axios.get(eventUrl, { headers: { Authorization: `Bearer ${token}` } });
+        console.log("🔎 Hunting Chat ID via Lead Notes...");
+        // Buscamos notas tipo 'service_message' o 'common' que contengan info del chat
+        const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}/notes`;
+        const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
         
-        // Buscamos cualquier evento que tenga chat_id en sus valores
+        const notes = res.data._embedded?.notes || [];
+        
+        // Iteramos buscando params que parezcan un chat_id (formato UUID o largo)
+        for (const note of notes) {
+            if (note.params) {
+                // Estructura común en WhatsApp Lite/Official
+                if (note.params.chat_id) return note.params.chat_id;
+                if (note.params.thread_id) return note.params.thread_id;
+                
+                // A veces viene dentro de 'metadata' o 'service' en el texto
+            }
+        }
+    } catch(e) { console.log("Failed Strategy C"); }
+
+    // ESTRATEGIA B (FIXED): Historial de Eventos (Sin filtro type que daba 400)
+    try {
+        console.log("🔎 Hunting Chat ID via Lead Events (Deep Search)...");
+        // Quitamos filter[type] para evitar error 400. Traemos TODO y filtramos aquí.
+        const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}`;
+        const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
+        
         const events = res.data._embedded?.events || [];
         for (const ev of events) {
-            // A veces está en value, a veces en meta
-            if (ev.value_after && ev.value_after.chat_id) return ev.value_after.chat_id;
-            if (ev.value_before && ev.value_before.chat_id) return ev.value_before.chat_id;
-            
-            // Log para debuggear eventos si falla
-            // console.log("Event:", JSON.stringify(ev, null, 2));
+            // Buscamos eventos de mensaje entrante (type: incoming_chat_message o similar)
+            if (ev.type === 'incoming_chat_message' || ev.type === 'chat_message') {
+                if (ev.value_after?.chat_id) {
+                    console.log(`✅ Found Chat ID via Event: ${ev.value_after.chat_id}`);
+                    return ev.value_after.chat_id;
+                }
+            }
+            // Revisamos metadata genérica por si acaso
+            if (ev.value_after?.link && ev.value_after.link.includes('chat_id')) {
+                // A veces viene en un link interno
+            }
         }
-    } catch(e) { console.log("Failed Strategy B", e.message); }
+    } catch(e) { console.log("Failed Strategy B"); }
 
     return null;
 }
@@ -148,12 +172,13 @@ async function findChatId(contactId, leadId, token) {
 async function sendReply(chatId, text, token) {
     if (!text) return;
     try {
+        console.log(`💬 Attempting to send to Chat: ${chatId}`);
         await axios.post(
             `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks/chats/${chatId}/messages`,
             { text: text },
             { headers: { Authorization: `Bearer ${token}` } }
         );
-        console.log(`✅ Message Sent to Chat ${chatId}`);
+        console.log(`✅ Message SENT successfully.`);
     } catch (e) {
         console.error("❌ Send Message Error:", e.response?.data || e.message);
     }
