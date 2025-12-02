@@ -14,29 +14,37 @@ app.use(express.json());
 app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
-    // 📨 Ack fast
+    // 📨 Responder OK de inmediato
     res.status(200).send('OK'); 
     
     try {
         const body = req.body;
-        console.log("📨 Webhook Event Received");
+        
+        // 🔍 RAYOS X: Imprimir todo lo que llegue para depurar
+        console.log("📨 RAW PAYLOAD:", JSON.stringify(body, null, 2));
 
-        // 🔥 EVENT: INCOMING MESSAGE (The Golden Key)
+        // ------------------------------------------------------
+        // EVENTO 1: MENSAJE ENTRANTE (Aquí está el Chat ID)
+        // ------------------------------------------------------
         if (body.message && body.message.add) {
             const msg = body.message.add[0];
-            
-            // Only reply to Incoming messages (Not our own)
+            console.log(`💬 MESSAGE EVENT DETECTED! ID: ${msg.chat_id}, Type: ${msg.type}`);
+
+            // Solo respondemos a mensajes del cliente (incoming)
             if (msg.type === 'incoming') {
-                console.log(`💬 Incoming Message detected from Chat: ${msg.chat_id}`);
-                
-                // msg.entity_id is usually the Lead ID
+                // msg.entity_id suele ser el Lead ID en WhatsApp
                 await processMessageEvent(msg.entity_id, msg.chat_id, msg.text);
+            } else {
+                console.log("Ignored: Message type is not incoming.");
             }
+            return; // Ya procesamos, salimos.
         }
 
-        // Keep "Lead Added" as fallback if needed, but Message is better
+        // ------------------------------------------------------
+        // EVENTO 2: LEAD CREADO (Solo informativo por ahora)
+        // ------------------------------------------------------
         if (body.leads && body.leads.add) {
-            console.log("🔔 Lead Created Event (Ignored in favor of Message Event)");
+            console.log("🔔 Lead Created Event received. Waiting for Message Event...");
         }
 
     } catch (err) {
@@ -48,61 +56,71 @@ async function processMessageEvent(leadId, chatId, messageText) {
     try {
         const token = await getAccessToken();
 
-        // 1. Verify Lead Status/Pipeline (Gatekeeper)
-        // We only want to reply if the lead is in the specific column
-        const leadUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`;
-        const leadRes = await axios.get(leadUrl, { headers: { Authorization: `Bearer ${token}` } });
-        const leadData = leadRes.data;
+        // 1. Verificar Pipeline y Status
+        // Necesitamos confirmar que el mensaje es de un lead en la columna correcta
+        // A veces entity_id en mensajes es el Lead ID. Validemos.
+        let leadUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`;
+        
+        // Si leadId falla (a veces es contact_id), intentamos resolverlo
+        // Pero primero probemos directo:
+        try {
+            const leadRes = await axios.get(leadUrl, { headers: { Authorization: `Bearer ${token}` } });
+            const leadData = leadRes.data;
 
-        // Check Pipeline
-        if (String(leadData.pipeline_id) !== String(process.env.PIPELINE_ID_VENTAS)) {
-            console.log(`🛑 Message ignored: Lead is in wrong pipeline.`);
-            return;
+            // Filtros de Seguridad
+            if (String(leadData.pipeline_id) !== String(process.env.PIPELINE_ID_VENTAS)) {
+                console.log(`🛑 Message ignored: Lead in wrong pipeline (${leadData.pipeline_id}).`);
+                return;
+            }
+            
+            // Verifica que esté en "Entrada / Nuevo Lead" (o la columna que desees)
+            if (String(leadData.status_id) !== String(process.env.STATUS_ID_ENTRANTES)) {
+                console.log(`🛑 Message ignored: Status is ${leadData.status_id}. Waiting for ${process.env.STATUS_ID_ENTRANTES}.`);
+                return;
+            }
+
+        } catch (error) {
+            console.log("⚠️ Could not fetch Lead info from entity_id. Is this a Contact ID?", error.message);
+            // Si quieres que responda igual aunque falle la verificación, comenta el return.
+            // return; 
         }
 
-        // Check Status (Only reply if in "Entrada" or "Incoming")
-        // If you want it to reply in ANY column, remove this check.
-        if (String(leadData.status_id) !== String(process.env.STATUS_ID_ENTRANTES)) {
-            console.log(`🛑 Message ignored: Lead Status is ${leadData.status_id}, expected ${process.env.STATUS_ID_ENTRANTES}`);
-            return;
-        }
+        console.log(`✅ AI ACTIVATED for Chat ${chatId}`);
 
-        console.log(`✅ Lead Qualified for Reply. AI Processing...`);
-
-        // 2. AI Processing
-        // (In future pass conversation history here)
+        // 2. Procesar con IA
+        // (Aquí podrías pasar historial previo si lo tuvieras)
         const context = []; 
         const aiResponse = await analizarMensaje(context, messageText);
 
-        // 3. Send Reply using the DIRECT CHAT ID
+        // 3. Responder
         if (aiResponse.tool_calls) {
             const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
-            console.log("💾 AI executed Tool:", args);
-            
-            await sendReply(chatId, "¡Datos recibidos! Un asesor te contactará.", token);
-            
+            console.log("💾 AI Tool Args:", args);
+            await sendReply(chatId, "Recibido. Un asesor validará la información.", token);
+            // Lógica de cambio de estado (Opcional)
             if(process.env.STATUS_ID_DESPACHO) await changeStatus(leadId, process.env.STATUS_ID_DESPACHO, token);
+
         } else {
             await sendReply(chatId, aiResponse.content, token);
-            
+            // Mover a "Cualificando"
             if(process.env.STATUS_ID_CUALIFICANDO) await changeStatus(leadId, process.env.STATUS_ID_CUALIFICANDO, token);
         }
 
     } catch (error) {
-        console.error("❌ Process Message Error:", error.message);
+        console.error("❌ Logic Error:", error.message);
     }
 }
 
 async function sendReply(chatId, text, token) {
     if (!text) return;
     try {
-        console.log(`📤 Sending Reply to ${chatId}...`);
+        console.log(`📤 Sending to ${chatId}...`);
         await axios.post(
             `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks/chats/${chatId}/messages`,
             { text: text },
             { headers: { Authorization: `Bearer ${token}` } }
         );
-        console.log(`✅ Message SENT Successfully!`);
+        console.log(`✅ REPLY SENT SUCCESS!`);
     } catch (e) {
         console.error("❌ Send Failed:", e.response?.data || e.message);
     }
@@ -115,14 +133,14 @@ async function changeStatus(leadId, statusId, token) {
             { status_id: parseInt(statusId) },
             { headers: { Authorization: `Bearer ${token}` } }
         );
-        console.log(`➡️ Lead ${leadId} moved to Status ID ${statusId}`);
+        console.log(`➡️ Status Updated to ${statusId}`);
     } catch (e) {
-        console.error("❌ Status Change Error:", e.message);
+        console.error("❌ Status Error:", e.message);
     }
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`🚀 Bot ready on port ${PORT}`);
-    try { await getAccessToken(); console.log("✅ Auth Verified."); } catch (e) {}
+    try { await getAccessToken(); console.log("✅ Auth Ready"); } catch (e) {}
 });
