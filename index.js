@@ -108,14 +108,18 @@ async function processLead(leadId) {
 async function sendReply(contactId, text, token) {
     if (!text) return;
     try {
-        // Step A: Find the active Chat ID for this contact
-        const chatUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/${contactId}/chats`;
+        // 🛠 FIX: Change URL to ask for contact WITH chats included
+        const chatUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/${contactId}?with=chats`;
         const chatRes = await axios.get(chatUrl, { headers: { Authorization: `Bearer ${token}` } });
         
-        // Kommo usually returns an array of chats. We take the most recent.
-        const chatId = chatRes.data._embedded?.chats?.[0]?.chat_id;
+        // Check if there are any embedded chats
+        const chats = chatRes.data._embedded?.chats;
 
-        if (chatId) {
+        if (chats && chats.length > 0) {
+            // Usually the last updated chat is the active one
+            const chatId = chats[0].chat_id;
+            console.log(`💬 Found Chat ID: ${chatId}`);
+
             await axios.post(
                 `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks/chats/${chatId}/messages`,
                 { text: text },
@@ -123,7 +127,7 @@ async function sendReply(contactId, text, token) {
             );
             console.log(`✅ Message Sent to Chat ${chatId}`);
         } else {
-            console.log("⚠️ Contact has no active Chat ID (Needs at least one incoming message).");
+            console.log("⚠️ No Active Chat found for this contact (Maybe it was a phone lead, not WhatsApp?)");
         }
     } catch (e) {
         console.error("❌ Send Message Error:", e.response?.data || e.message);
