@@ -64,42 +64,32 @@ async function processLead(leadId) {
     try {
         const token = await getAccessToken();
 
-        // 1. Get contact info associated with the Lead
-        const leadUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}?with=contacts`;
+        // 1. Pedir el Lead PERO pidiendo ver si tiene metadatos
+        // Ojo: A veces el chat_id está en "custom_fields" o "metadata"
+        const leadUrl = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}?with=contacts,catalog_elements,is_price_modified,loss_reason,only_deleted`;
         const leadRes = await axios.get(leadUrl, { headers: { Authorization: `Bearer ${token}` } });
+        const leadData = leadRes.data;
+
+        // 🚨 AQUÍ ESTÁ LA CLAVE: Vamos a imprimir el Lead completo
+        console.log("📄 FULL LEAD DATA DUMP:", JSON.stringify(leadData, null, 2));
+
+        const contactId = leadData._embedded.contacts?.[0]?.id;
         
-        const contactId = leadRes.data._embedded.contacts?.[0]?.id;
-        if (!contactId) return console.log("❌ Lead has no contact attached. Cannot reply.");
-
-        console.log(`👤 Processing Contact ID: ${contactId}`);
-
-        // 2. Mock Context (TODO: Fetch real chat history here later)
-        const context = []; 
-        const incomingMessage = "Hola, me interesa más información."; 
-
-        // 3. Ask OpenAI
-        const aiResponse = await analizarMensaje(context, incomingMessage);
-
-        // 4. Execute AI Action
-        if (aiResponse.tool_calls) {
-            // Case: AI wants to run a function (save data)
-            const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
-            console.log("💾 AI executed Tool - Saving Data:", args);
-            
-            await sendReply(contactId, "¡Perfecto! He guardado tus datos para el despacho. Un asesor validará tu pedido pronto.", token);
-            
-            // Move to Despacho
-            if(process.env.STATUS_ID_DESPACHO) {
-                await changeStatus(leadId, process.env.STATUS_ID_DESPACHO, token);
-            }
-        } else {
-            // Case: AI just replies with text
-            console.log("🤖 AI Reply:", aiResponse.content);
-            await sendReply(contactId, aiResponse.content, token);
-            
-            // Move to Cualificando to avoid loops
-            await changeStatus(leadId, process.env.STATUS_ID_CUALIFICANDO, token);
+        // Verificación de seguridad
+        if (leadData.pipeline_id != process.env.PIPELINE_ID_VENTAS) {
+            console.log(`🛑 Ignoring Lead ${leadId}: Wrong Pipeline (${leadData.pipeline_id})`);
+            return;
         }
+
+        if (!contactId) return console.log("❌ Lead has no contact attached. Cannot reply.");
+        console.log(`👤 Contact ID: ${contactId}`);
+
+        // ... (Saltamos la parte de OpenAI por un segundo para no gastar saldo mientras debuggeamos)
+        // Solo queremos ver si podemos encontrar el chat
+        
+        // Intento 2: Buscar Chat en el Contacto (Ya sabemos que esto fallaba, pero lo dejamos por si acaso)
+        await sendReply(contactId, "Ping de prueba (No responder)", token);
+
     } catch (error) {
         console.error("❌ Process Lead Error:", error.message);
     }
