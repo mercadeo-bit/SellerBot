@@ -125,4 +125,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`🚀 Bot ready on port ${PORT}`);
     try { await getAccessToken(); console.log("✅ Auth Verified."); } catch (e) {}
-});git 
+});
