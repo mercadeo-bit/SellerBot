@@ -9,18 +9,30 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Helpers de espera
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Variable global para recordar el dominio correcto (amocrm.com vs kommo.com)
+let apiDomain = process.env.KOMMO_SUBDOMAIN + '.kommo.com';
 
 app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
-    res.status(200).send('OK'); // Responder siempre OK rápido
+    res.status(200).send('OK');
 
     try {
         const body = req.body;
-        // Imprimir raw para debug
-        // console.log("📨 Payload:", JSON.stringify(body, null, 2));
+        
+        // 🕵️ DETECTAR DOMINIO AUTOMÁTICAMENTE
+        // Si Kommo nos dice que su link es amocrm.com, usamos ese.
+        if (body.account && body.account._links && body.account._links.self) {
+            const selfUrl = body.account._links.self; // Ej: https://sub.amocrm.com
+            // Extraer el dominio limpio (sub.amocrm.com)
+            const domainMatch = selfUrl.match(/https?:\/\/([^\/]+)/);
+            if (domainMatch && domainMatch[1]) {
+                apiDomain = domainMatch[1];
+                console.log(`🌍 API Domain synced to: ${apiDomain}`);
+            }
+        }
 
         // ------------------------------------------------------
         // ESTRATEGIA 1: MENSAJE DIRECTO (La mejor opción)
@@ -35,25 +47,21 @@ app.post('/webhook', async (req, res) => {
         }
 
         // ------------------------------------------------------
-        // ESTRATEGIA 2: LEAD CREADO (El Plan B robusto)
+        // ESTRATEGIA 2: LEAD CREADO (Plan B - Notas)
         // ------------------------------------------------------
         if (body.leads && body.leads.add) {
             const lead = body.leads.add[0];
-            const leadId = lead.id;
-            console.log(`🔔 LEAD CREATED: ${leadId}. Hunting for Chat ID...`);
+            console.log(`🔔 LEAD CREATED: ${lead.id}. Waiting to verify type...`);
 
-            // Esperar 3 segundos a que Kommo guarde la nota del mensaje
+            // Esperar a que se guarde la nota del mensaje inicial
             await sleep(3000);
-
-            // Buscar el Chat ID en las notas
-            const result = await getChatDataFromNotes(leadId);
             
+            const result = await getChatDataFromNotes(lead.id);
             if (result && result.chatId) {
                 console.log(`✅ FOUND CHAT ID IN NOTES: ${result.chatId}`);
-                const textoMensaje = result.text || "Hola (Nuevo Lead)";
-                await processReply(leadId, result.chatId, textoMensaje);
+                await processReply(lead.id, result.chatId, result.text || "Hola");
             } else {
-                console.log("⚠️ Could not find chat_id in Lead Notes.");
+                console.log("⚠️ No chat_id in notes yet. (Maybe manually created?)");
             }
         }
 
@@ -62,28 +70,26 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// Lógica Principal de Respuesta
 async function processReply(leadId, chatId, incomingText) {
     try {
         const token = await getAccessToken();
 
-        // Verificar Filtros (Pipeline, Estado)
-        const leadRes = await axios.get(`https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`, { 
+        // 1. Obtener datos del Lead para verificar Status/Pipeline
+        // Usamos apiDomain dinámico
+        const leadRes = await axios.get(`https://${apiDomain}/api/v4/leads/${leadId}`, { 
             headers: { Authorization: `Bearer ${token}` } 
         });
         const leadData = leadRes.data;
 
-        // Opcional: Validar Pipeline (Si quieres responder a TODOS, comenta esto)
+        // OJO: Si quieres activar filtro de status, descomenta esto:
         /*
-        if (String(leadData.pipeline_id) !== String(process.env.PIPELINE_ID_VENTAS)) {
-            console.log("🛑 Wrong Pipeline. Ignoring.");
+        if (String(leadData.status_id) !== String(process.env.STATUS_ID_ENTRANTES)) {
+            console.log(`🛑 Status ${leadData.status_id} incorrect. Ignoring.`);
             return;
         }
         */
 
-        console.log(`🤖 AI Thinking for Chat ${chatId}...`);
-        
-        // Consultar OpenAI
+        console.log(`🤖 AI Thinking...`);
         const context = []; 
         const aiResponse = await analizarMensaje(context, incomingText);
 
@@ -92,66 +98,76 @@ async function processReply(leadId, chatId, incomingText) {
             const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
             console.log("💾 Saving Data:", args);
             await sendReply(chatId, "¡Datos recibidos! Gracias.", token);
-            // Mover
+            // Move Status
             if(process.env.STATUS_ID_DESPACHO) await changeStatus(leadId, process.env.STATUS_ID_DESPACHO, token);
         } else {
             await sendReply(chatId, aiResponse.content, token);
-            // Mover a Cualificando
+            // Move Status
             if(process.env.STATUS_ID_CUALIFICANDO) await changeStatus(leadId, process.env.STATUS_ID_CUALIFICANDO, token);
         }
 
     } catch (e) {
-        console.error("❌ Process Reply Error:", e.message);
+        console.error("❌ Process Logic Error:", e.message);
     }
 }
 
-// 🕵️ CAZADOR DE NOTAS (Recupera Chat ID de los metadatos)
 async function getChatDataFromNotes(leadId) {
     try {
         const token = await getAccessToken();
-        const url = `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}/notes`;
+        const url = `https://${apiDomain}/api/v4/leads/${leadId}/notes`;
         const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
         
         const notes = res.data._embedded?.notes || [];
-        
-        // Buscar en orden cronológico inverso (última nota primero)
         for (const note of notes.reverse()) {
-            // Nota tipo: Mensaje Entrante
-            if (note.note_type === 'message_in' || note.note_type === 4) {
-                // A veces está en params
-                if (note.params && note.params.chat_id) {
-                    return { chatId: note.params.chat_id, text: note.params.text };
-                }
-            }
-            // Buscar en Service Message (common)
-            if (note.params && (note.params.service === 'WhatsApp' || note.params.service === 'com.amocrm.amocrmwa')) {
-               if (note.params.chat_id) return { chatId: note.params.chat_id, text: "Nuevo mensaje" };
+            if (note.params && note.params.chat_id) {
+                return { chatId: note.params.chat_id, text: note.params.text };
             }
         }
-    } catch (e) {
-        console.log("❌ Notes Hunt Failed:", e.message);
-    }
+    } catch (e) {}
     return null;
 }
 
 async function sendReply(chatId, text, token) {
     if (!text) return;
     try {
+        console.log(`📤 Sending via ${apiDomain}...`);
+        
+        // 💡 FIX 404: Usar el dominio dinámico correcto (amocrm.com vs kommo.com)
         await axios.post(
-            `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/talks/chats/${chatId}/messages`,
+            `https://${apiDomain}/api/v4/talks/chats/${chatId}/messages`,
             { text: text },
             { headers: { Authorization: `Bearer ${token}` } }
         );
-        console.log(`✅ MESSAGE SENT!`);
+        console.log(`✅ MESSAGE SENT SUCCESS! 🚀`);
     } catch (e) {
-        console.error("❌ Send Failed:", e.message);
+        console.error("❌ Send Failed:", e.response?.data || e.message);
+        
+        // Retry logic: Si falló con amocrm, intenta forzar kommo (o viceversa) como último recurso
+        if (e.response && e.response.status === 404) {
+            console.log("🔄 Retrying with fallback domain...");
+            // Toggle domain simple para reintento
+            const fallbackDomain = apiDomain.includes('amocrm') 
+                ? apiDomain.replace('amocrm', 'kommo') 
+                : apiDomain.replace('kommo', 'amocrm');
+                
+            try {
+                await axios.post(
+                    `https://${fallbackDomain}/api/v4/talks/chats/${chatId}/messages`,
+                    { text: text },
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+                console.log(`✅ RETRY SENT SUCCESS!`);
+            } catch (err2) {
+                 console.error("❌ Retry also failed.");
+            }
+        }
     }
 }
 
 async function changeStatus(leadId, statusId, token) {
     try {
         await axios.patch(
-            `https://${process.env.KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`,
+            `https://${apiDomain}/api/v4/leads/${leadId}`,
             { status_id: parseInt(statusId) },
             { headers: { Authorization: `Bearer ${token}` } }
         );
