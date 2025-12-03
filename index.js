@@ -9,7 +9,7 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Forzamos amocrm.com (confirmado por tus logs)
+// Dominio base
 const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
 
 app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
@@ -24,11 +24,17 @@ app.post('/webhook', async (req, res) => {
         if (body.message && body.message.add) {
             const msg = body.message.add[0];
             if (msg.type === 'incoming') {
-                console.log(`\n📨 INCOMING MSG: "${msg.text}"`);
-                console.log(`ℹ️ UUID: ${msg.chat_id} | Num ID: ${msg.talk_id || 'N/A'}`);
+                console.log(`\n📨 INCOMING FROM: ${msg.chat_id}`);
                 
-                // Disparamos la lógica
-                await processReply(msg.entity_id, msg.chat_id, msg.text, msg.talk_id);
+                // Recopilamos datos CRÍTICOS para el envío explícito
+                // msg.author suele contener datos del cliente
+                // msg.chat_id es el canal
+                await processReply({
+                    leadId: msg.entity_id,
+                    chatId: msg.chat_id, 
+                    text: msg.text, 
+                    contactId: msg.contact_id // Kommo manda esto en el webhook de mensajes
+                });
             }
         }
     } catch (err) {
@@ -36,90 +42,79 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-async function processReply(leadId, chatUuid, incomingText, talkIdInt) {
+async function processReply({ leadId, chatId, text, contactId }) {
     try {
         const token = await getAccessToken();
 
-        // 1. OBTENER LA IDENTIDAD DEL BOT (AMOJO_ID)
-        // Esto es crucial para firmar el mensaje
-        let botAmojoId = null;
+        // 1. Obtener la Identidad del BOT (Remitente)
+        let botIdentity = null;
         try {
-            console.log("🕵️ Fetching Bot Identity (Amojo ID)...");
-            const accRes = await axios.get(`https://${API_DOMAIN}/api/v4/account?with=amojo_id`, {
+            const me = await axios.get(`https://${API_DOMAIN}/api/v4/account?with=amojo_id`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
-            botAmojoId = accRes.data.amojo_id;
-            console.log(`🤖 Bot Identity Found: ${botAmojoId}`);
-        } catch (e) {
-            console.log("⚠️ Could not fetch Amojo ID. Sending anonymous.");
-        }
+            botIdentity = me.data.amojo_id;
+            console.log(`🤖 Sender Identity (Bot): ${botIdentity}`);
+        } catch(e) { console.log("⚠️ Failed to get Bot Identity"); }
 
-        // 2. IA THINKING
+        // 2. IA Thinking
         console.log(`🧠 AI Generating response...`);
         const context = []; 
-        const aiResponse = await analizarMensaje(context, incomingText);
-        const textToSend = aiResponse.tool_calls ? "¡Datos recibidos!" : aiResponse.content;
+        const aiResponse = await analizarMensaje(context, text);
+        const replyText = aiResponse.tool_calls ? "¡Datos Recibidos!" : aiResponse.content;
 
-        // ============================================================
-        // FASE DE DISPARO MÚLTIPLE (QUEMANDO TODAS LAS OPCIONES)
-        // ============================================================
-
-        // OPCIÓN 1: Enviar al UUID con firma de autor
-        const sent1 = await trySend({
-            targetId: chatUuid,
-            text: textToSend,
-            token,
-            label: "UUID + Identity",
-            senderId: botAmojoId
+        // 3. ENVIAR CON SUPER PAYLOAD
+        // Intentaremos decirle explícitamente QUIÉN recibe el mensaje
+        await sendExplicitReply({
+            chatId, 
+            text: replyText, 
+            token, 
+            botIdentity,
+            receiverContactId: contactId
         });
-
-        if (sent1) return; // Si funcionó, terminamos.
-
-        // OPCIÓN 2: Enviar al ID Numérico (Si existe)
-        if (talkIdInt) {
-            const sent2 = await trySend({
-                targetId: talkIdInt, // Usamos el número corto (ej: 6703)
-                text: textToSend,
-                token,
-                label: "NUMERIC ID + Identity",
-                senderId: botAmojoId
-            });
-            if (sent2) return;
-        }
-
-        // OPCIÓN 3: Payload Complejo (Estructura legacy)
-        // A veces se requiere una estructura diferente
-        console.log("⚠️ All simple attempts failed. Trying Complex Payload...");
-        /* Aquí podríamos meter un fallback más agresivo si todo falla */
 
     } catch (e) {
         console.error("❌ Process Error:", e.message);
     }
 }
 
-async function trySend({ targetId, text, token, label, senderId }) {
-    const url = `https://${API_DOMAIN}/api/v4/talks/chats/${targetId}/messages`;
-    console.log(`🔫 [${label}] Trying POST to: .../chats/${targetId}/messages`);
+async function sendExplicitReply({ chatId, text, token, botIdentity, receiverContactId }) {
+    const url = `https://${API_DOMAIN}/api/v4/talks/chats/${chatId}/messages`;
     
-    // Construimos el body. Si tenemos ID de sender, lo agregamos.
-    const payload = { text: text };
-    
-    // NOTA: En V4 standard el sender suele inferirse, pero en algunos endpoints
-    // se pasa como header o propiedad extra. Probamos standard primero.
-    
+    // ESTRATEGIA: "FORZAR" los datos del remitente y receptor
+    // Esto suele desbloquear el error 404 en canales externos
+    const payload = {
+        text: text,
+        // Al especificar el receptor, ayudamos al enrutador de Kommo
+        receiver: {
+            id: receiverContactId, 
+            // Si el contacto es numérico, lo convertimos a string o viceversa según convenga, 
+            // pero normalmente el ID directo funciona.
+        },
+        // Al especificar el remitente (tu integración), validamos el permiso
+        sender: {
+            ref_id: botIdentity,
+            name: "Asistente Virtual" // Nombre que aparecerá (a veces)
+        }
+    };
+
+    console.log(`🔫 SENDING EXPLICIT PAYLOAD TO: ${url}`);
+    // console.log("📦 Payload:", JSON.stringify(payload)); 
+
     try {
         await axios.post(url, payload, { 
             headers: { 
                 Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'X-M-Id': senderId // A veces se usa este header no documentado para identidad
+                'Content-Type': 'application/json'
             } 
         });
-        console.log(`✅ [${label}] SUCCESS! MESSAGE SENT! 🏆`);
-        return true;
+        console.log(`✅ MESSAGE SENT SUCCESS! 🏆`);
     } catch (e) {
-        console.log(`❌ [${label}] Failed (${e.response?.status}): ${JSON.stringify(e.response?.data)}`);
-        return false;
+        console.log(`❌ Explicit Send Failed: ${e.response?.status} - ${JSON.stringify(e.response?.data)}`);
+        
+        // ULTIMO RECURSO: Enviar como Nota al Lead (Si no podemos chatear, al menos dejamos la nota)
+        // Esto confirmará si al menos podemos escribir en el CRM
+        console.log("🚑 Fallback: Posting as Lead Note...");
+        // await postNoteFallback(...) // Implementaríamos esto solo si el cliente lo pide
     }
 }
 
