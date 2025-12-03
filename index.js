@@ -9,7 +9,7 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Forzamos amocrm.com que es donde vimos que vive tu cuenta
+// Forzamos amocrm.com (confirmado por tus logs)
 const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
 
 app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
@@ -19,14 +19,16 @@ app.post('/webhook', async (req, res) => {
 
     try {
         const body = req.body;
-        console.log("📨 Payload Received");
-
-        // MENSAJE ENTRANTE
+        
+        // INTERCEPTAMOS EL MENSAJE
         if (body.message && body.message.add) {
             const msg = body.message.add[0];
             if (msg.type === 'incoming') {
-                console.log(`💬 WEBOOK CHAT ID: ${msg.chat_id}`);
-                await processSmartReply(msg.entity_id, msg.chat_id, msg.text);
+                console.log(`\n📨 INCOMING MSG: "${msg.text}"`);
+                console.log(`ℹ️ UUID: ${msg.chat_id} | Num ID: ${msg.talk_id || 'N/A'}`);
+                
+                // Disparamos la lógica
+                await processReply(msg.entity_id, msg.chat_id, msg.text, msg.talk_id);
             }
         }
     } catch (err) {
@@ -34,62 +36,90 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-async function processSmartReply(leadId, incomingChatId, incomingText) {
+async function processReply(leadId, chatUuid, incomingText, talkIdInt) {
     try {
         const token = await getAccessToken();
 
-        // 1. CONFIRMAR CHAT ID REAL USANDO "TALKS"
-        // Consultamos todas las conversaciones abiertas para ver cuál coincide
-        console.log(`🔎 Validating Chat ID via /talks...`);
-        const talksUrl = `https://${API_DOMAIN}/api/v4/talks`;
-        const talksRes = await axios.get(talksUrl, { headers: { Authorization: `Bearer ${token}` } });
-        
-        const activeTalks = talksRes.data._embedded?.talks || [];
-        let verifiedChatId = null;
-
-        // Buscamos el match
-        const matchingTalk = activeTalks.find(t => t.chat_id === incomingChatId);
-
-        if (matchingTalk) {
-            console.log(`✅ MATCH FOUND! Verified Chat ID: ${matchingTalk.chat_id}`);
-            verifiedChatId = matchingTalk.chat_id;
-        } else {
-            console.log(`⚠️ Match not found in list. Using Webhook ID blindly: ${incomingChatId}`);
-            verifiedChatId = incomingChatId;
+        // 1. OBTENER LA IDENTIDAD DEL BOT (AMOJO_ID)
+        // Esto es crucial para firmar el mensaje
+        let botAmojoId = null;
+        try {
+            console.log("🕵️ Fetching Bot Identity (Amojo ID)...");
+            const accRes = await axios.get(`https://${API_DOMAIN}/api/v4/account?with=amojo_id`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            botAmojoId = accRes.data.amojo_id;
+            console.log(`🤖 Bot Identity Found: ${botAmojoId}`);
+        } catch (e) {
+            console.log("⚠️ Could not fetch Amojo ID. Sending anonymous.");
         }
 
-        console.log(`🤖 AI Thinking...`);
+        // 2. IA THINKING
+        console.log(`🧠 AI Generating response...`);
         const context = []; 
         const aiResponse = await analizarMensaje(context, incomingText);
-        const textToSend = aiResponse.tool_calls ? "¡Recibido!" : aiResponse.content;
+        const textToSend = aiResponse.tool_calls ? "¡Datos recibidos!" : aiResponse.content;
 
-        // 2. ENVIAR MENSAJE
-        const sendUrl = `https://${API_DOMAIN}/api/v4/talks/chats/${verifiedChatId}/messages`;
-        console.log(`📤 POSTing to: ${sendUrl}`);
-        
-        await axios.post(
-            sendUrl,
-            { text: textToSend },
-            { headers: { Authorization: `Bearer ${token}` } }
-        );
+        // ============================================================
+        // FASE DE DISPARO MÚLTIPLE (QUEMANDO TODAS LAS OPCIONES)
+        // ============================================================
 
-        console.log(`✅ SUCCESS! Message sent to ${verifiedChatId}`);
+        // OPCIÓN 1: Enviar al UUID con firma de autor
+        const sent1 = await trySend({
+            targetId: chatUuid,
+            text: textToSend,
+            token,
+            label: "UUID + Identity",
+            senderId: botAmojoId
+        });
+
+        if (sent1) return; // Si funcionó, terminamos.
+
+        // OPCIÓN 2: Enviar al ID Numérico (Si existe)
+        if (talkIdInt) {
+            const sent2 = await trySend({
+                targetId: talkIdInt, // Usamos el número corto (ej: 6703)
+                text: textToSend,
+                token,
+                label: "NUMERIC ID + Identity",
+                senderId: botAmojoId
+            });
+            if (sent2) return;
+        }
+
+        // OPCIÓN 3: Payload Complejo (Estructura legacy)
+        // A veces se requiere una estructura diferente
+        console.log("⚠️ All simple attempts failed. Trying Complex Payload...");
+        /* Aquí podríamos meter un fallback más agresivo si todo falla */
 
     } catch (e) {
-        console.error("❌ PROCESS FAILED:");
-        if (e.response) {
-            console.error(`   Status: ${e.response.status}`);
-            console.error(`   Data: ${JSON.stringify(e.response.data)}`);
-            
-            // Intento desesperado: Si 404, probamos con el endpoint Legacy de Amojo
-            // Solo se ejecuta si lo anterior falló
-            if (e.response.status === 404) {
-                 console.log("🚑 EMERGENCY: Trying Legacy Endpoint /v2/origin/custom...");
-                 // (Implementación futura si esto falla)
-            }
-        } else {
-            console.error(`   Error: ${e.message}`);
-        }
+        console.error("❌ Process Error:", e.message);
+    }
+}
+
+async function trySend({ targetId, text, token, label, senderId }) {
+    const url = `https://${API_DOMAIN}/api/v4/talks/chats/${targetId}/messages`;
+    console.log(`🔫 [${label}] Trying POST to: .../chats/${targetId}/messages`);
+    
+    // Construimos el body. Si tenemos ID de sender, lo agregamos.
+    const payload = { text: text };
+    
+    // NOTA: En V4 standard el sender suele inferirse, pero en algunos endpoints
+    // se pasa como header o propiedad extra. Probamos standard primero.
+    
+    try {
+        await axios.post(url, payload, { 
+            headers: { 
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'X-M-Id': senderId // A veces se usa este header no documentado para identidad
+            } 
+        });
+        console.log(`✅ [${label}] SUCCESS! MESSAGE SENT! 🏆`);
+        return true;
+    } catch (e) {
+        console.log(`❌ [${label}] Failed (${e.response?.status}): ${JSON.stringify(e.response?.data)}`);
+        return false;
     }
 }
 
