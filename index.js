@@ -2,83 +2,99 @@ import express from 'express';
 import dotenv from 'dotenv';
 import axios from 'axios';
 import { getAccessToken } from './src/kommoAuth.js';
+import { analizarMensaje } from './src/openaiService.js';
 
 dotenv.config();
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-app.get('/', (req, res) => res.send('DIAGNOSTIC MODE 🟢'));
+// Forzamos amocrm.com que es donde vimos que vive tu cuenta
+const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
+
+app.get('/', (req, res) => res.send('Copacol AI Integrator is UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
-    const body = req.body;
 
-    // Solo nos interesa el mensaje entrante para la prueba
-    if (body.message && body.message.add && body.message.add[0].type === 'incoming') {
-        const msg = body.message.add[0];
-        console.log(`\n🕵️ STARTING DIAGNOSTIC FOR CHAT: ${msg.chat_id}`);
-        await runDiagnostics(msg.chat_id);
+    try {
+        const body = req.body;
+        console.log("📨 Payload Received");
+
+        // MENSAJE ENTRANTE
+        if (body.message && body.message.add) {
+            const msg = body.message.add[0];
+            if (msg.type === 'incoming') {
+                console.log(`💬 WEBOOK CHAT ID: ${msg.chat_id}`);
+                await processSmartReply(msg.entity_id, msg.chat_id, msg.text);
+            }
+        }
+    } catch (err) {
+        console.error('❌ Webhook Error:', err.message);
     }
 });
 
-async function runDiagnostics(chatId) {
+async function processSmartReply(leadId, incomingChatId, incomingText) {
     try {
         const token = await getAccessToken();
+
+        // 1. CONFIRMAR CHAT ID REAL USANDO "TALKS"
+        // Consultamos todas las conversaciones abiertas para ver cuál coincide
+        console.log(`🔎 Validating Chat ID via /talks...`);
+        const talksUrl = `https://${API_DOMAIN}/api/v4/talks`;
+        const talksRes = await axios.get(talksUrl, { headers: { Authorization: `Bearer ${token}` } });
         
-        // Determinar dominio
-        const domain = "mercadeocopacolcalicom.amocrm.com"; // Forzado al que sabemos que es real
+        const activeTalks = talksRes.data._embedded?.talks || [];
+        let verifiedChatId = null;
 
-        console.log("---------------------------------------------------");
-        console.log("TEST 1: CHECKING ACCOUNT & SCOPES");
-        // 1. Ver detalles de la cuenta (nos dirá si el token es válido)
-        try {
-            const accRes = await axios.get(`https://${domain}/api/v4/account`, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            console.log("✅ ACCOUNT ACCESS: OK");
-            console.log(`ℹ️ Account Name: ${accRes.data.name}`);
-            console.log(`ℹ️ Current Subdomain: ${accRes.data.subdomain}`);
-            // (Nota: Kommo V4 no muestra scopes explícitos aquí, pero el éxito confirma acceso básico)
-        } catch (e) {
-            console.log("❌ ACCOUNT ACCESS FAILED:", e.message);
-            console.log(JSON.stringify(e.response?.data, null, 2));
-            return; // Si esto falla, nada más funcionará
+        // Buscamos el match
+        const matchingTalk = activeTalks.find(t => t.chat_id === incomingChatId);
+
+        if (matchingTalk) {
+            console.log(`✅ MATCH FOUND! Verified Chat ID: ${matchingTalk.chat_id}`);
+            verifiedChatId = matchingTalk.chat_id;
+        } else {
+            console.log(`⚠️ Match not found in list. Using Webhook ID blindly: ${incomingChatId}`);
+            verifiedChatId = incomingChatId;
         }
 
-        console.log("---------------------------------------------------");
-        console.log("TEST 2: PEEK AT CHAT DETAILS (GET)");
-        // 2. Intentar LEER el chat (GET en lugar de POST)
-        // Esto verifica si tenemos permiso de lectura sobre Chats
-        try {
-            const chatRes = await axios.get(`https://${domain}/api/v4/talks/chats/${chatId}`, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            console.log("✅ READ CHAT PERMISSION: OK");
-            console.log("ℹ️ Chat Type:", chatRes.data.channel_type);
-        } catch (e) {
-            console.log("❌ READ CHAT PERMISSION: FAILED");
-            console.log("👉 Status:", e.response?.status);
-            console.log("👉 Detail:", JSON.stringify(e.response?.data));
+        console.log(`🤖 AI Thinking...`);
+        const context = []; 
+        const aiResponse = await analizarMensaje(context, incomingText);
+        const textToSend = aiResponse.tool_calls ? "¡Recibido!" : aiResponse.content;
+
+        // 2. ENVIAR MENSAJE
+        const sendUrl = `https://${API_DOMAIN}/api/v4/talks/chats/${verifiedChatId}/messages`;
+        console.log(`📤 POSTing to: ${sendUrl}`);
+        
+        await axios.post(
+            sendUrl,
+            { text: textToSend },
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        console.log(`✅ SUCCESS! Message sent to ${verifiedChatId}`);
+
+    } catch (e) {
+        console.error("❌ PROCESS FAILED:");
+        if (e.response) {
+            console.error(`   Status: ${e.response.status}`);
+            console.error(`   Data: ${JSON.stringify(e.response.data)}`);
             
-            // Si falla lectura, intentamos leer TODOS los chats (para ver si Talks está activo)
-            console.log("   -> Trying to list ANY chat...");
-            try {
-                await axios.get(`https://${domain}/api/v4/talks`, { headers: { Authorization: `Bearer ${token}` } });
-                console.log("   ✅ 'Talks' endpoint is ACCESSIBLE (Scope exists). The specific Chat ID is likely hidden/private.");
-            } catch(e2) {
-                console.log("   ❌ 'Talks' endpoint is DEAD (404/403). THE INTEGRATION LACKS 'CHATS' SCOPE.");
+            // Intento desesperado: Si 404, probamos con el endpoint Legacy de Amojo
+            // Solo se ejecuta si lo anterior falló
+            if (e.response.status === 404) {
+                 console.log("🚑 EMERGENCY: Trying Legacy Endpoint /v2/origin/custom...");
+                 // (Implementación futura si esto falla)
             }
+        } else {
+            console.error(`   Error: ${e.message}`);
         }
-
-        console.log("---------------------------------------------------");
-    } catch (err) {
-        console.error("DIAGNOSTIC ERROR:", err.message);
     }
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`🚀 DIAGNOSTIC BOT READY on ${PORT}`);
-    await getAccessToken(); 
+    console.log(`🚀 Bot ready on port ${PORT}`);
+    try { await getAccessToken(); console.log("✅ Verified."); } catch (e) {}
 });
