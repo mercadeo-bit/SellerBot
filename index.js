@@ -9,13 +9,10 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Dominio detectado (Legacy)
 const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
-
-// TIEMPO DE ESPERA PARA QUE KOMMO PROCESE EL CAMPO
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI Integrator (Stage Trigger) UP 🟢'));
+app.get('/', (req, res) => res.send('Copacol AI Integrator (Infinity Chat) UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -23,9 +20,10 @@ app.post('/webhook', async (req, res) => {
     try {
         const body = req.body;
         
-        // INTERCEPTAMOS EL MENSAJE
+        // INTERCEPTAMOS EL MENSAJE ENTRANTE
         if (body.message && body.message.add) {
             const msg = body.message.add[0];
+            // Solo responder a mensajes del cliente (incoming)
             if (msg.type === 'incoming') {
                 console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}: "${msg.text}"`);
                 await processSmartFieldReply(msg.entity_id, msg.text);
@@ -42,46 +40,51 @@ async function processSmartFieldReply(leadId, incomingText) {
 
         // 1. Pensar respuesta IA
         console.log(`🧠 AI Generating response...`);
-        const context = []; 
+        const context = []; // En el futuro implementaremos historial aquí
         const aiResponse = await analizarMensaje(context, incomingText);
         
-        // Limpieza de texto
         let finalText = aiResponse.tool_calls ? "¡Datos recibidos! Un asesor revisará tu pedido." : aiResponse.content;
+        
+        // Limpieza de caracteres que rompen JSON
         finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
 
-        console.log(`📝 Updating Field & Moving Stage...`);
+        console.log(`📝 Updating Field...`);
 
-        // 2. ACTUALIZAR CAMPO
+        // 2. ACTUALIZAR EL CAMPO (CARGAR LA BALA)
         const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
         if (!fieldId) return console.error("❌ MISSING VAR: FIELD_ID_RESPUESTA_IA");
 
         const updateUrl = `https://${API_DOMAIN}/api/v4/leads/${leadId}`;
         
         try {
-            // Paso A: Guardar la respuesta en el campo
             await axios.patch(updateUrl, {
                 custom_fields_values: [
                     { field_id: fieldId, values: [{ value: finalText }] }
                 ]
             }, { headers: { Authorization: `Bearer ${token}` } });
-            
             console.log(`✅ FIELD UPDATED.`);
 
-            // ESPERAR 1 SEGUNDO (Vital para que Kommo no se sature antes de mover)
-            await sleep(1000);
-
-            // Paso B: MOVER DE ETAPA (El Gatillo)
-            // Movemos a "Cualificando" (Status ID 96928848 según tus logs)
-            const targetStatus = parseInt(process.env.STATUS_ID_CUALIFICANDO);
+            // 3. LA MANIOBRA DE DISPARO (RETROCESO -> AVANCE)
+            // Esto obliga al Salesbot a detectar una "entrada" a la etapa cada vez
             
-            await axios.patch(updateUrl, {
-                status_id: targetStatus
-            }, { headers: { Authorization: `Bearer ${token}` } });
+            const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);    // Etapa Anterior
+            const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO); // Etapa Objetivo
 
-            console.log(`➡️ MOVED TO STAGE ${targetStatus}. Salesbot should fire now!`);
+            // Paso A: Mover Atrás (Recargar)
+            console.log("🔙 Stepping back to re-trigger...");
+            await axios.patch(updateUrl, { status_id: stageEntrada }, { headers: { Authorization: `Bearer ${token}` } });
+
+            // Paso B: Esperar (Para que Kommo procese el cambio)
+            await sleep(2000);
+
+            // Paso C: Mover Adelante (Disparar)
+            console.log("🔫 Firing (Moving to Target Stage)...");
+            await axios.patch(updateUrl, { status_id: stageCualificando }, { headers: { Authorization: `Bearer ${token}` } });
+            
+            console.log(`🚀 Salesbot TRIGGERED for continuous chat.`);
 
         } catch (updateErr) {
-            console.error("❌ Update/Move Failed:", updateErr.response?.data || updateErr.message);
+            console.error("❌ Move Failed:", updateErr.response?.data || updateErr.message);
         }
 
     } catch (e) {
