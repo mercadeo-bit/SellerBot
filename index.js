@@ -12,7 +12,7 @@ app.use(express.json());
 const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI Integrator (Infinity Chat) UP 🟢'));
+app.get('/', (req, res) => res.send('Copacol AI Integrator (Secured) UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -20,12 +20,12 @@ app.post('/webhook', async (req, res) => {
     try {
         const body = req.body;
         
-        // INTERCEPTAMOS EL MENSAJE ENTRANTE
         if (body.message && body.message.add) {
             const msg = body.message.add[0];
-            // Solo responder a mensajes del cliente (incoming)
+            // Solo procesamos Incoming
             if (msg.type === 'incoming') {
-                console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}: "${msg.text}"`);
+                // Logueamos pero no actuamos todavía
+                console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}`);
                 await processSmartFieldReply(msg.entity_id, msg.text);
             }
         }
@@ -38,54 +38,76 @@ async function processSmartFieldReply(leadId, incomingText) {
     try {
         const token = await getAccessToken();
 
-        // 1. Pensar respuesta IA
+        // 1. OBTENER DATOS DEL LEAD (PARA VERIFICAR PIPELINE)
+        // Pedimos info del lead antes de hacer NADA
+        const leadRes = await axios.get(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { 
+            headers: { Authorization: `Bearer ${token}` } 
+        });
+        const leadData = leadRes.data;
+
+        // ============================================================
+        // ⛔ PORTERO DE SEGURIDAD (SECURITY GATEKEEPER)
+        // ============================================================
+        const targetPipeline = parseInt(process.env.PIPELINE_ID_VENTAS); // 12549896
+        const currentPipeline = leadData.pipeline_id ? parseInt(leadData.pipeline_id) : 0;
+
+        // Si el lead NO está en el Pipeline SYE, LO IGNORAMOS TOTALMENTE
+        if (currentPipeline !== targetPipeline) {
+            console.log(`🛑 IGNORED: Lead is in Pipeline ${currentPipeline} (Expected ${targetPipeline}). Not my jurisdiction.`);
+            return; // ABORTAR MISIÓN
+        }
+        
+        // (Opcional) Doble chequeo de estado:
+        // Solo respondemos si está en "Entrada" o "Cualificando" (o las que tú quieras)
+        /*
+        const statusEntrantes = parseInt(process.env.STATUS_ID_ENTRANTES);
+        const statusCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
+        
+        if (leadData.status_id != statusEntrantes && leadData.status_id != statusCualificando) {
+             console.log(`🛑 IGNORED: Lead is in a restricted status ${leadData.status_id}.`);
+             return;
+        }
+        */
+
+        console.log(`✅ ACCESS GRANTED: Lead is in correct Pipeline.`);
+
+        // 2. INTELIGENCIA ARTIFICIAL
         console.log(`🧠 AI Generating response...`);
-        const context = []; // En el futuro implementaremos historial aquí
+        const context = []; 
         const aiResponse = await analizarMensaje(context, incomingText);
         
         let finalText = aiResponse.tool_calls ? "¡Datos recibidos! Un asesor revisará tu pedido." : aiResponse.content;
-        
-        // Limpieza de caracteres que rompen JSON
         finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
 
-        console.log(`📝 Updating Field...`);
-
-        // 2. ACTUALIZAR EL CAMPO (CARGAR LA BALA)
+        // 3. ACTUALIZAR CAMPO
         const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
         if (!fieldId) return console.error("❌ MISSING VAR: FIELD_ID_RESPUESTA_IA");
 
         const updateUrl = `https://${API_DOMAIN}/api/v4/leads/${leadId}`;
         
-        try {
-            await axios.patch(updateUrl, {
-                custom_fields_values: [
-                    { field_id: fieldId, values: [{ value: finalText }] }
-                ]
-            }, { headers: { Authorization: `Bearer ${token}` } });
-            console.log(`✅ FIELD UPDATED.`);
+        await axios.patch(updateUrl, {
+            custom_fields_values: [
+                { field_id: fieldId, values: [{ value: finalText }] }
+            ]
+        }, { headers: { Authorization: `Bearer ${token}` } });
+        console.log(`📝 Field Updated.`);
 
-            // 3. LA MANIOBRA DE DISPARO (RETROCESO -> AVANCE)
-            // Esto obliga al Salesbot a detectar una "entrada" a la etapa cada vez
-            
-            const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);    // Etapa Anterior
-            const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO); // Etapa Objetivo
+        // 4. MANIOBRA DE DISPARO (RETROCESO -> AVANCE)
+        const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
+        const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
 
-            // Paso A: Mover Atrás (Recargar)
-            console.log("🔙 Stepping back to re-trigger...");
+        // Solo hacemos el movimiento si NO queremos loops infinitos de movimiento
+        // Si el lead ya está en "Cualificando", lo movemos atrás y adelante
+        // Si está en "Entrada", solo lo movemos adelante
+        
+        if (leadData.status_id == stageCualificando) {
+            console.log("🔙 Stepping back...");
             await axios.patch(updateUrl, { status_id: stageEntrada }, { headers: { Authorization: `Bearer ${token}` } });
-
-            // Paso B: Esperar (Para que Kommo procese el cambio)
             await sleep(2000);
-
-            // Paso C: Mover Adelante (Disparar)
-            console.log("🔫 Firing (Moving to Target Stage)...");
-            await axios.patch(updateUrl, { status_id: stageCualificando }, { headers: { Authorization: `Bearer ${token}` } });
-            
-            console.log(`🚀 Salesbot TRIGGERED for continuous chat.`);
-
-        } catch (updateErr) {
-            console.error("❌ Move Failed:", updateErr.response?.data || updateErr.message);
         }
+
+        console.log("🔫 Firing Salesbot...");
+        await axios.patch(updateUrl, { status_id: stageCualificando }, { headers: { Authorization: `Bearer ${token}` } });
 
     } catch (e) {
         console.error("❌ Process Error:", e.message);
