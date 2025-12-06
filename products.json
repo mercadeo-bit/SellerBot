@@ -1,4 +1,28 @@
 [
-{ "id": 1, "nombre": "Soldador Inversor Furius 131M", "precio": 319900 },
-{ "id": 2, "nombre": "Taladro FURIUS FCD12KIT", "precio": 199000 }
+  {
+    "id": 1,
+    "nombre": "SOLDADOR INVERSOR FURIUS FIERCE 131M",
+    "referencia": "FW131M",
+    "precio": 319900,
+    "categoria": "Soldadura y Herramientas",
+    "descripcion_corta": "Soldador inversor portátil (110V) de 130A. Ideal para cerrajería, mantenimiento y trabajos domésticos.",
+    "beneficios": [
+      "Arco estable y arranque suave (Tecnología IGBT).",
+      "Bajo consumo energético.",
+      "Portátil y ultraliviano.",
+      "Protección térmica y de sobrecarga."
+    ],
+    "especificaciones_tecnicas": {
+      "voltaje": "110V – 60 Hz",
+      "amperaje": "20 – 130A (Ciclo de trabajo 60% a 130A)",
+      "tipo_soldadura": "MMA (Electrodo revestido)",
+      "electrodos_compatibles": "Hasta 3.2 mm (1/8\")",
+      "medidas_producto": "Largo: 23.5cm | Ancho: 10.4cm | Alto: 15.8cm",
+      "peso_equipo": "2.2 kg (Neto)",
+      "peso_caja": "3.1 kg (Bruto)",
+      "medidas_caja": "30cm x 16cm x 20.5cm"
+    },
+    "incluye": "Portaelectrodos, pinza de tierra, cables y careta básica.",
+    "politica_envio": "Envío GRATIS en Cali. Servicio de CONTRA ENTREGA disponible únicamente en Cali."
+  }
 ]
