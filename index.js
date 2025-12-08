@@ -185,7 +185,7 @@ async function handleOrderCreation(leadId, args, token) {
             {
                 to_entity_id: PRODUCT_ID,
                 to_entity_type: "catalog_elements",
-                metadata: { quantity: quantity, catalog_id: 12053 }
+                metadata: { quantity: quantity, catalog_id: 77598 }
             }
         ], { headers: { Authorization: `Bearer ${token}` } });
         console.log("✅ Product Linked.");
