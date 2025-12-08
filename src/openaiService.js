@@ -6,18 +6,17 @@ import { fileURLToPath } from 'url';
 
 dotenv.config();
 
-// 1. SETUP: We use the exact key name from your original working code
+// 1. SETUP: Use exact key from your env
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_KEY 
 });
 
-// 2. LOAD PRODUCTS (THE BRAIN)
-// We keep this because without it, she hallucinates prices.
+// 2. LOAD PRODUCTS SAFELY
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const productsPath = path.join(__dirname, 'products.json');
 
-let productCatalogString = "Consulte stock manualmente.";
+let productCatalogString = "Consultar stock manualmente.";
 try {
     if (fs.existsSync(productsPath)) {
         const productsData = JSON.parse(fs.readFileSync(productsPath, 'utf8'));
@@ -28,44 +27,40 @@ try {
             PRECIO: $${(p.precio || 0).toLocaleString('es-CO')} COP
             DESCRIPCIÓN: ${p.descripcion_corta || ''}
             BENEFICIOS: ${(p.beneficios || []).join(', ')}
-            ESPECIFICACIONES: ${(p.especificaciones_tecnicas ? JSON.stringify(p.especificaciones_tecnicas) : '')}
             LOGÍSTICA: ${p.politica_envio || ''}
             ---`
         ).join('\n');
     }
 } catch (err) {
-    console.error("⚠️ Error leyendo products.json:", err.message);
+    console.error("⚠️ Error reading products.json:", err.message);
 }
 
-// 3. SYSTEM PROMPT (FAVER STYLE + PRODUCTS)
+// 3. SYSTEM PROMPT
 const SYSTEM_PROMPT = `
-ACTÚA COMO: Sofía, asesora digital de COPACOL. 
+Eres Sofía, asesora digital de COPACOL. 
 TU META: Asesorar, crear alianzas y cerrar ventas ferreteras.
-ESTILO DE VENTA: "Estilo Faver" (Cálido, aliado comercial, transparente).
+ESTILO: "Estilo Faver" (Cálido, corto, profesional).
 
-INVENTARIO REAL (NO inventes productos ni precios distintos a estos):
+INVENTARIO REAL (Usa estos datos, no inventes):
 ${productCatalogString}
 
-REGLAS DE COMUNICACIÓN:
-- Usa mensajes CORTOS (tipo WhatsApp). No bloques de texto.
-- Siempre saluda por el nombre si lo conoces.
-- ALIANZA: Usa frases como "Aliados comerciales", "Crecer juntos".
-- STOCK: Si el producto está en JSON, véndelo. Si no, di que no lo manejas.
-- EMOJIS: Máximo 2 por mensaje (🙏🏽, 👌🏽, 💪🏽, 🙂, 🤝).
+REGLAS:
+1. Siempre saluda por el nombre si lo conoces.
+2. MENSAJES CORTOS: Máximo 3 oraciones.
+3. STOCK: Si está en la lista, véndelo. Si no, di "no lo manejo por ahora".
+4. PRECIO: Si piden descuento, explica calidad (Original vs Reciclado).
 
-CONOCIMIENTO TÉCNICO:
-- Presión: Mangueras Calibre 40 (90 PSI) vs Calibre 60 (120 PSI).
-- Precios: Si les parece caro, explica durabilidad vs material reciclado.
+DATOS TÉCNICOS:
+- Mangueras: Calibre 40 (90 PSI), Calibre 60 (120 PSI).
 `;
 
-// 4. TOOLS: RESTORED TO ORIGINAL DEFINITION
-// We reverted this to strictly match "ms_..." fields so Kommo/Railway doesn't break.
+// 4. TOOLS (Using original ms_ prefixes to prevent pipeline errors)
 const tools = [
     {
         type: "function",
         function: {
             name: "update_delivery_info",
-            description: "Extrae datos del cliente para preparar despacho cuando el cliente confirme la compra.",
+            description: "Extrae datos del cliente para preparar despacho.",
             parameters: {
                 type: "object",
                 properties: {
@@ -81,37 +76,64 @@ const tools = [
     }
 ];
 
-export async function analizarMensaje(contexto, mensajeUsuario) {
-    try {
-        // SAFETY CHECK 1: Don't send empty messages (Causes 400 Error)
-        if (!mensajeUsuario || mensajeUsuario.trim() === "") {
-            console.log("⚠️ Mensaje usuario vacío, omitiendo llamada OpenAI.");
-            return { content: "¿Hola? Sigo aquí atenta." };
+// 5. HELPER: Sanitize Context
+// This function fixes the 400 Error by repairing broken history objects
+function sanitizeMessages(messages) {
+    if (!Array.isArray(messages)) return [];
+
+    return messages.map(msg => {
+        // Safe copy of the message
+        const safeMsg = { 
+            role: msg.role || 'user', // Default to user if role missing
+            content: msg.content 
+        };
+
+        // Rule 1: Content must be a string, or null (only if tools exist)
+        if (safeMsg.content === undefined || safeMsg.content === null) {
+            safeMsg.content = ""; // Force empty string instead of null to be safe
+        }
+        
+        // Rule 2: Ensure content is strictly string
+        if (typeof safeMsg.content !== 'string') {
+            safeMsg.content = JSON.stringify(safeMsg.content);
         }
 
-        // SAFETY CHECK 2: Clean History (Contexto)
-        // This removes any "null" or broken messages from the past that cause the 2nd message crash.
-        const cleanContext = Array.isArray(contexto) 
-            ? contexto.filter(msg => msg && msg.role && typeof msg.content === 'string') 
-            : [];
+        return safeMsg;
+    });
+}
 
-        const completion = await openai.chat.completions.create({
+export async function analizarMensaje(contexto, mensajeUsuario) {
+    try {
+        // Prevent empty user message crash
+        if (!mensajeUsuario || mensajeUsuario.trim() === "") {
+            return { content: "Estoy atenta, ¿me decías?" };
+        }
+
+        // --- THE FIX IS HERE ---
+        // We clean the history before sending it to OpenAI
+        const historyClean = sanitizeMessages(contexto);
+
+        const response = await openai.chat.completions.create({
             model: "gpt-4-turbo", 
             messages: [
                 { role: "system", content: SYSTEM_PROMPT },
-                ...cleanContext, 
+                ...historyClean, 
                 { role: "user", content: mensajeUsuario }
             ],
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.5, // 0.5 is better for balancing exact prices with Faver's warmth
+            temperature: 0.5,
         });
 
-        return completion.choices[0].message;
+        return response.choices[0].message;
 
     } catch (error) {
-        console.error("❌ OpenAI API Error Details:", error);
-        // Fallback para no dejar al cliente en visto
-        return { content: "Estoy revisando esa información, dame un segundo... 🧐" };
+        // Log the exact reason for the crash
+        if (error.response) {
+            console.error("❌ OpenAI API REFUSED (400) - DATA:", JSON.stringify(error.response.data));
+        } else {
+            console.error("❌ OpenAI API ERROR:", error.message);
+        }
+        return { content: "Dame un momento, estoy verificando esa información..." };
     }
 }
