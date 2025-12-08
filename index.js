@@ -13,9 +13,9 @@ const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
 const PRODUCT_ID = 1755995; 
 const PRODUCT_PRICE = 319900; 
 
-// === ⚠️ REEMPLAZA ESTOS VALORES CON TUS IDS DE MASTERSHOP ===
-const ID_PIPELINE_MASTERSHOP = 12631352; // <--- PON AQUÍ EL ID DEL PIPELINE MASTERSHOP
-const ID_STATUS_INICIAL_MASTERSHOP = 97525680; // <--- PON AQUÍ EL ID DE LA PRIMERA COLUMNA
+// === IDS DE MASTERSHOP (CONFIGURACIÓN) ===
+const ID_PIPELINE_MASTERSHOP = 12631352; 
+const ID_STATUS_INICIAL_MASTERSHOP = 97525680;
 
 const FIELDS = {
     NOMBRE: 2099831,
@@ -75,6 +75,7 @@ async function processSmartFieldReply(leadId, incomingText) {
 
         // 2. AI GENERATION
         console.log(`🧠 AI Generating response...`);
+        // Currently context is empty (Amnessic mode to prevent large context errors)
         const context = []; 
         const aiResponse = await analizarMensaje(context, incomingText);
 
@@ -95,17 +96,19 @@ async function processSmartFieldReply(leadId, incomingText) {
 
             // C) MOVE TO MASTERSHOP PIPELINE
             if (ID_PIPELINE_MASTERSHOP !== 0 && ID_STATUS_INICIAL_MASTERSHOP !== 0) {
-                console.log(`🚚 MOVING LEAD TO MASTERSHOP (Pipeline: ${ID_PIPELINE_MASTERSHOP})...`);
+                console.log(`🚚 MOVING LEAD TO MASTERSHOP...`);
                 
-                await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
-                    pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
-                    status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
-                }, { headers: { Authorization: `Bearer ${token}` } });
-                
-                console.log("✅ TRANSFER COMPLETE. Lead left the chatbot.");
-                return; // ⛔ STOP HERE. Don't trigger salesbot in old pipeline.
-            } else {
-                console.warn("⚠️ Lead saved but NOT moved (Missing Mastershop IDs in Code).");
+                try {
+                    await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+                        pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
+                        status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
+                    }, { headers: { Authorization: `Bearer ${token}` } });
+                    
+                    console.log("✅ TRANSFER COMPLETE. Lead left the chatbot.");
+                    return; // ⛔ STOP HERE.
+                } catch (moveError) {
+                    console.error("⚠️ Error moving lead:", moveError.response?.data || moveError.message);
+                }
             }
 
         } else {
@@ -114,6 +117,13 @@ async function processSmartFieldReply(leadId, incomingText) {
             // ==========================================
             let finalText = aiResponse.content || "...";
             finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
+            
+            // 🛑 SAFETY SCISSORS: CRITICAL FIX FOR 400 ERROR
+            // Kommo only accepts 255 chars in text fields. We cut at 250 to be safe.
+            if (finalText.length > 250) {
+                console.log(`⚠️ Truncating text from ${finalText.length} to 250 chars to prevent Kommo crash.`);
+                finalText = finalText.substring(0, 248) + "..";
+            }
             
             await updateAiResponseField(leadId, finalText, token);
 
@@ -126,7 +136,7 @@ async function processSmartFieldReply(leadId, incomingText) {
                     { status_id: stageEntrada }, 
                     { headers: { Authorization: `Bearer ${token}` } }
                 );
-                await sleep(2000);
+                await sleep(2000); // Wait for Kommo to process the move
             }
 
             console.log("🔫 Firing Salesbot...");
@@ -138,6 +148,10 @@ async function processSmartFieldReply(leadId, incomingText) {
 
     } catch (e) {
         console.error("❌ Process Error:", e.message);
+        // Tip: If error is 400, it's usually the field content being invalid/too long
+        if (e.response && e.response.status === 400) {
+            console.error("Data sent:", e.response.config.data);
+        }
     }
 }
 
