@@ -6,18 +6,18 @@ import { fileURLToPath } from 'url';
 
 dotenv.config();
 
-// 1. SETUP & CONFIGURATION
+// 1. SETUP: We use the exact key name from your original working code
 const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
+    apiKey: process.env.OPENAI_KEY 
 });
 
-// Helper to load products dynamically
+// 2. LOAD PRODUCTS (THE BRAIN)
+// We keep this because without it, she hallucinates prices.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const productsPath = path.join(__dirname, 'products.json');
 
-// Safely load product data (Prevent crash if file is missing/empty during dev)
-let productCatalogString = "No hay productos disponibles por el momento.";
+let productCatalogString = "Consulte stock manualmente.";
 try {
     if (fs.existsSync(productsPath)) {
         const productsData = JSON.parse(fs.readFileSync(productsPath, 'utf8'));
@@ -29,54 +29,53 @@ try {
             DESCRIPCIÓN: ${p.descripcion_corta || ''}
             BENEFICIOS: ${(p.beneficios || []).join(', ')}
             ESPECIFICACIONES: ${(p.especificaciones_tecnicas ? JSON.stringify(p.especificaciones_tecnicas) : '')}
-            ENVÍO/LOGÍSTICA: ${p.politica_envio || ''}
+            LOGÍSTICA: ${p.politica_envio || ''}
             ---`
         ).join('\n');
-    } else {
-        console.warn("⚠️ ALERTA: No se encontró products.json en " + productsPath);
     }
 } catch (err) {
     console.error("⚠️ Error leyendo products.json:", err.message);
 }
 
-// 2. THE BRAIN: SYSTEM PROMPT
+// 3. SYSTEM PROMPT (FAVER STYLE + PRODUCTS)
 const SYSTEM_PROMPT = `
-ACTÚA COMO: Sofía, Asesora Digital de COPACOL.
-ESTILO DE VENTA: Sigues el "Estilo Faver".
-OBJETIVO: Calificar leads, responder dudas técnicas con precisión y cerrar ventas.
-INVENTARIO: Solo puedes vender lo siguiente. No inventes precios ni productos:
+ACTÚA COMO: Sofía, asesora digital de COPACOL. 
+TU META: Asesorar, crear alianzas y cerrar ventas ferreteras.
+ESTILO DE VENTA: "Estilo Faver" (Cálido, aliado comercial, transparente).
+
+INVENTARIO REAL (NO inventes productos ni precios distintos a estos):
 ${productCatalogString}
 
-=== PRINCIPIOS DE COMUNICACIÓN (ESTILO FAVER) ===
-1. TONO: Cálido, aliado comercial (partners), servicial.
-2. ALIANZA: Frases clave: "Crecer juntos", "Construir relación", "Hacer parte de su equipo".
-3. FORMATO: Mensajes cortos (WhatsApp style). Máximo 1 o 2 emojis (🙏🏽, 👌🏽, 💪🏽, 🙂).
-4. CIERRE: No presiones. "¿Quedamos con este pedido?", "¿Cómo te gustaría proceder?".
+REGLAS DE COMUNICACIÓN:
+- Usa mensajes CORTOS (tipo WhatsApp). No bloques de texto.
+- Siempre saluda por el nombre si lo conoces.
+- ALIANZA: Usa frases como "Aliados comerciales", "Crecer juntos".
+- STOCK: Si el producto está en JSON, véndelo. Si no, di que no lo manejas.
+- EMOJIS: Máximo 2 por mensaje (🙏🏽, 👌🏽, 💪🏽, 🙂, 🤝).
 
-=== CONOCIMIENTO TÉCNICO ===
-- Mangueras: Calibre 40 (90 PSI), Calibre 60 (120 PSI). Si buscan barato, menciona material reciclado pero explica durabilidad.
-- Stock: Si algo no está (según json), sé honesta: "Hoy no llegó, ¿te envío lo demás?".
-
-=== REGLAS ===
-- Respuesta CORTA (ideal para móvil).
-- SI CONFIRMAN COMPRA: Pide Dirección y Ciudad. Llama a 'update_delivery_info'.
-- Si preguntan precio: Dalo exacto del catálogo + info de envío (ej: Gratis en Cali).
+CONOCIMIENTO TÉCNICO:
+- Presión: Mangueras Calibre 40 (90 PSI) vs Calibre 60 (120 PSI).
+- Precios: Si les parece caro, explica durabilidad vs material reciclado.
 `;
 
+// 4. TOOLS: RESTORED TO ORIGINAL DEFINITION
+// We reverted this to strictly match "ms_..." fields so Kommo/Railway doesn't break.
 const tools = [
     {
         type: "function",
         function: {
             name: "update_delivery_info",
-            description: "Guardar datos de despacho cuando el cliente confirma compra.",
+            description: "Extrae datos del cliente para preparar despacho cuando el cliente confirme la compra.",
             parameters: {
                 type: "object",
                 properties: {
-                    cedula: { type: "string" },
-                    direccion: { type: "string" },
-                    ciudad: { type: "string" }
+                    ms_nombre_completo: { type: "string" },
+                    ms_documento_numero: { type: "string" },
+                    ms_direccion_exacta: { type: "string" },
+                    ms_ciudad: { type: "string" },
+                    ms_telefono: { type: "string" }
                 },
-                required: ["direccion", "ciudad"]
+                required: ["ms_nombre_completo", "ms_telefono"]
             }
         }
     }
@@ -84,38 +83,35 @@ const tools = [
 
 export async function analizarMensaje(contexto, mensajeUsuario) {
     try {
-        // Validation: Prevent 400 errors if message is empty
+        // SAFETY CHECK 1: Don't send empty messages (Causes 400 Error)
         if (!mensajeUsuario || mensajeUsuario.trim() === "") {
-            return { content: "¿Hola? ¿Sigues ahí? Estoy atenta." };
+            console.log("⚠️ Mensaje usuario vacío, omitiendo llamada OpenAI.");
+            return { content: "¿Hola? Sigo aquí atenta." };
         }
 
-        const hoy = new Date();
-        const opciones = { weekday: 'long', hour: 'numeric', minute: 'numeric' };
-        const fechaActual = hoy.toLocaleDateString('es-CO', opciones);
+        // SAFETY CHECK 2: Clean History (Contexto)
+        // This removes any "null" or broken messages from the past that cause the 2nd message crash.
+        const cleanContext = Array.isArray(contexto) 
+            ? contexto.filter(msg => msg && msg.role && typeof msg.content === 'string') 
+            : [];
 
-        // Clean Context: Filter out any invalid messages from history that might crash OpenAI
-        const cleanContext = Array.isArray(contexto) ? contexto.filter(msg => msg && msg.role && msg.content !== null) : [];
-
-        const response = await openai.chat.completions.create({
-            model: "gpt-4-turbo",
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4-turbo", 
             messages: [
-                { role: "system", content: SYSTEM_PROMPT + `\n(Fecha: ${fechaActual})` },
+                { role: "system", content: SYSTEM_PROMPT },
                 ...cleanContext, 
                 { role: "user", content: mensajeUsuario }
             ],
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.3,
+            temperature: 0.5, // 0.5 is better for balancing exact prices with Faver's warmth
         });
-        
-        return response.choices[0].message;
+
+        return completion.choices[0].message;
+
     } catch (error) {
-        // Detailed error logging for debugging 400s
-        if (error.response) {
-            console.error("❌ OpenAI API 400+ Error Data:", JSON.stringify(error.response.data));
-        } else {
-            console.error("❌ OpenAI API Error:", error.message);
-        }
-        return { content: "Estoy validando esa información, dame un momento por favor." };
+        console.error("❌ OpenAI API Error Details:", error);
+        // Fallback para no dejar al cliente en visto
+        return { content: "Estoy revisando esa información, dame un segundo... 🧐" };
     }
 }
