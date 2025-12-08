@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 
 dotenv.config();
 
-// 1. SETUP: Try both common variable names to be safe
+// 1. SETUP
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_KEY || process.env.OPENAI_API_KEY
 });
@@ -34,51 +34,61 @@ try {
     console.error("⚠️ Error leyendo products.json:", err.message);
 }
 
-// 3. SYSTEM PROMPT (Optimized for Kommo Limits)
-// CRITICAL: We explicitly order the AI to keep it short.
+// 3. SYSTEM PROMPT
 const SYSTEM_PROMPT = `
 ACTÚA COMO: Sofía, Asesora Digital de COPACOL.
 ESTILO: "Estilo Faver" (Amable, concreto, aliado comercial).
 INVENTARIO:
 ${productCatalogString}
 
-⚠️ REGLA DE ORO (TÉCNICA):
-Tus respuestas van a un sistema con LÍMITE DE CARACTERES.
-**Tu respuesta DEBE tener MENOS DE 250 CARACTERES.**
-Si te pasas, el sistema se rompe. Sé ultra-concisa.
+=== OBJETIVO PRINCIPAL: CERRAR LA VENTA ===
+Cuando el cliente diga "SÍ", "Lo quiero" o confirme interés de compra:
+1. Deja de vender y entra en **MODO RECOLECCIÓN DE DATOS**.
+2. Tu meta es llenar la herramienta 'finalizar_compra_mastershop'.
+3. NO inventes datos. Pídeselos al cliente uno por uno o en grupo.
 
-REGLAS DE VENTA:
-1. Si saludan, saluda corto: "¡Hola {Nombre}! Soy Sofía de Copacol. ¿En qué te apoyo?".
-2. Si preguntan precio: Dalo directo. "El soldador vale $319.900. ¿Te interesa?".
-3. Si preguntan specs: Resume. "110V, 130A, pesa 3kg. Ideal cerrajería.".
-4. Si confirman compra: "Perfecto. Confírmame Dirección y Ciudad para despacho.".
+=== DATOS OBLIGATORIOS PARA LA ORDEN ===
+Necesitas obtener (y separar) estos datos:
+- Nombre y Apellido (Sepáralos mentalmente).
+- Cédula / NIT (Dato numérico).
+- Teléfono.
+- Correo Electrónico.
+- Departamento (Ej: Valle del Cauca, Antioquia, Cundinamarca).
+- Ciudad (Ej: Cali, Medellín, Buga).
+- Dirección exacta (Barrio, nomenclatura).
 
-ALERTA DE ERROR:
-- Nunca respondas con bloques de texto gigantes.
-- Máximo 1 o 2 emojis.
+⚠️ REGLA DE ORO:
+- Tu respuesta final DEBE ser MENOS DE 250 CARACTERES para WhatsApp.
+- Si faltan datos, pídelos amablemente: "¡Genial! Para generar la orden, confírmame por favor: Nombre completo, Cédula y Departamento."
+- Solo cuando tengas TODO, llama a la función.
 `;
 
 const tools = [
     {
         type: "function",
         function: {
-            name: "update_delivery_info",
-            description: "Guardar datos de despacho. ÚSALO SOLO si el cliente ya dio Dirección Y Ciudad.",
+            name: "finalizar_compra_mastershop",
+            description: "Ejecutar ESTRICTAMENTE cuando tengas TODOS los datos para crear la orden.",
             parameters: {
                 type: "object",
                 properties: {
-                    ms_nombre_completo: { type: "string" },
-                    ms_telefono: { type: "string" },
-                    ms_direccion_exacta: { type: "string" },
-                    ms_ciudad: { type: "string" }
+                    nombre: { type: "string", description: "Primer nombre del cliente" },
+                    apellido: { type: "string", description: "Apellidos del cliente" },
+                    cedula: { type: "string", description: "Número de documento de identidad" },
+                    telefono: { type: "string", description: "Número de celular/whatsapp" },
+                    email: { type: "string", description: "Correo electrónico (si no tiene, pon: noaplica@copacol.com)" },
+                    departamento: { type: "string", description: "Nombre completo del departamento (ej: Valle del Cauca)" },
+                    ciudad: { type: "string", description: "Nombre de la ciudad o municipio" },
+                    direccion: { type: "string", description: "Dirección física con barrio" },
+                    info_adicional: { type: "string", description: "Notas adicionales o puntos de referencia" },
+                    cantidad_productos: { type: "number", description: "Cantidad de unidades que desea llevar" }
                 },
-                required: ["ms_nombre_completo", "ms_telefono"]
+                required: ["nombre", "apellido", "cedula", "telefono", "departamento", "ciudad", "direccion"]
             }
         }
     }
 ];
 
-// Helper to avoid crashes if history is dirty
 function sanitizeMessages(messages) {
     if (!Array.isArray(messages)) return [];
     return messages.map(msg => ({
@@ -89,13 +99,9 @@ function sanitizeMessages(messages) {
 
 export async function analizarMensaje(contexto, mensajeUsuario) {
     try {
-        // Validation for empty input
-        if (!mensajeUsuario || mensajeUsuario.trim() === "") {
-            return { content: "¿Hola? Sigo aquí." };
-        }
-
+        if (!mensajeUsuario || mensajeUsuario.trim() === "") return { content: "Sigo aquí." };
+        
         const historyClean = sanitizeMessages(contexto);
-
         const response = await openai.chat.completions.create({
             model: "gpt-4-turbo",
             messages: [
@@ -105,23 +111,13 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
             ],
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.4,
-            max_tokens: 100 // Force OpenAI to stop generating early to save space
+            temperature: 0.2, // Baja temperatura para que sea estricto con los datos
+            max_tokens: 150
         });
 
-        const msg = response.choices[0].message;
-
-        // FINAL SAFETY CHECK: Content Valid?
-        // If content is null (Tool Call), index.js handles it.
-        // If content is text, we ensure it exists.
-        if (!msg.tool_calls && (!msg.content || msg.content === "null")) {
-            return { content: "Estoy revisando el stock, dame un momento." };
-        }
-
-        return msg;
-
+        return response.choices[0].message;
     } catch (error) {
         console.error("❌ OpenAI API Error:", error.message);
-        return { content: "Dame un segundo, estoy validando información..." };
+        return { content: "Estamos validando disponibilidad, un segundo." };
     }
 }

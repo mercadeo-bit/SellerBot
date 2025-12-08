@@ -10,6 +10,27 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
+const PRODUCT_ID = 1755995; 
+const PRODUCT_PRICE = 319900; 
+
+// === ⚠️ REEMPLAZA ESTOS VALORES CON TUS IDS DE MASTERSHOP ===
+const ID_PIPELINE_MASTERSHOP = 12631352; // <--- PON AQUÍ EL ID DEL PIPELINE MASTERSHOP
+const ID_STATUS_INICIAL_MASTERSHOP = 97525680; // <--- PON AQUÍ EL ID DE LA PRIMERA COLUMNA
+
+const FIELDS = {
+    NOMBRE: 2099831,
+    APELLIDO: 2099833,
+    CORREO: 2099835,
+    TELEFONO: 2099837,
+    DEPARTAMENTO: 2099839,
+    CIUDAD: 2099841,
+    DIRECCION: 2099843,
+    INFO_ADICIONAL: 2099845,
+    FORMA_PAGO: 2099849, 
+    VALOR_TOTAL: 2099863,
+    CEDULA: 2099635
+};
+
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.get('/', (req, res) => res.send('Copacol AI Integrator (Secured) UP 🟢'));
@@ -22,9 +43,7 @@ app.post('/webhook', async (req, res) => {
         
         if (body.message && body.message.add) {
             const msg = body.message.add[0];
-            // Solo procesamos Incoming
             if (msg.type === 'incoming') {
-                // Logueamos pero no actuamos todavía
                 console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}`);
                 await processSmartFieldReply(msg.entity_id, msg.text);
             }
@@ -38,80 +57,140 @@ async function processSmartFieldReply(leadId, incomingText) {
     try {
         const token = await getAccessToken();
 
-        // 1. OBTENER DATOS DEL LEAD (PARA VERIFICAR PIPELINE)
-        // Pedimos info del lead antes de hacer NADA
+        // 1. VERIFICAR PIPELINE ACTUAL
         const leadRes = await axios.get(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { 
             headers: { Authorization: `Bearer ${token}` } 
         });
         const leadData = leadRes.data;
-
-        // ============================================================
-        // ⛔ PORTERO DE SEGURIDAD (SECURITY GATEKEEPER)
-        // ============================================================
-        const targetPipeline = parseInt(process.env.PIPELINE_ID_VENTAS); // 12549896
+        
+        const targetPipeline = parseInt(process.env.PIPELINE_ID_VENTAS);
         const currentPipeline = leadData.pipeline_id ? parseInt(leadData.pipeline_id) : 0;
 
-        // Si el lead NO está en el Pipeline SYE, LO IGNORAMOS TOTALMENTE
         if (currentPipeline !== targetPipeline) {
-            console.log(`🛑 IGNORED: Lead is in Pipeline ${currentPipeline} (Expected ${targetPipeline}). Not my jurisdiction.`);
-            return; // ABORTAR MISIÓN
+            console.log(`🛑 IGNORED: Lead is in Pipeline ${currentPipeline}.`);
+            return;
         }
-        
-        // (Opcional) Doble chequeo de estado:
-        // Solo respondemos si está en "Entrada" o "Cualificando" (o las que tú quieras)
-        /*
-        const statusEntrantes = parseInt(process.env.STATUS_ID_ENTRANTES);
-        const statusCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
-        
-        if (leadData.status_id != statusEntrantes && leadData.status_id != statusCualificando) {
-             console.log(`🛑 IGNORED: Lead is in a restricted status ${leadData.status_id}.`);
-             return;
-        }
-        */
 
-        console.log(`✅ ACCESS GRANTED: Lead is in correct Pipeline.`);
+        console.log(`✅ ACCESS GRANTED. Processing...`);
 
-        // 2. INTELIGENCIA ARTIFICIAL
+        // 2. AI GENERATION
         console.log(`🧠 AI Generating response...`);
         const context = []; 
         const aiResponse = await analizarMensaje(context, incomingText);
-        
-        let finalText = aiResponse.tool_calls ? "¡Datos recibidos! Un asesor revisará tu pedido." : aiResponse.content;
-        finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
 
-        // 3. ACTUALIZAR CAMPO
-        const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
-        if (!fieldId) return console.error("❌ MISSING VAR: FIELD_ID_RESPUESTA_IA");
+        // 3. DECISIÓN: ¿COMANDO DE ACCIÓN O CHAT?
+        if (aiResponse.tool_calls) {
+            // ==========================================
+            // 🚀 ACTION MODE (DATA COLLECTED -> MOVE)
+            // ==========================================
+            console.log("🛠️ AI Triggered Action: Finalizar Compra");
+            
+            // A) Save Fields & Link Product
+            const toolArgs = JSON.parse(aiResponse.tool_calls[0].function.arguments);
+            await handleOrderCreation(leadId, toolArgs, token);
+            
+            // B) Confirm to User
+            const confirmationText = "¡Excelente! Tus datos están completos. Generando orden de despacho... 🚚";
+            await updateAiResponseField(leadId, confirmationText, token);
 
-        const updateUrl = `https://${API_DOMAIN}/api/v4/leads/${leadId}`;
-        
-        await axios.patch(updateUrl, {
-            custom_fields_values: [
-                { field_id: fieldId, values: [{ value: finalText }] }
-            ]
-        }, { headers: { Authorization: `Bearer ${token}` } });
-        console.log(`📝 Field Updated.`);
+            // C) MOVE TO MASTERSHOP PIPELINE
+            if (ID_PIPELINE_MASTERSHOP !== 0 && ID_STATUS_INICIAL_MASTERSHOP !== 0) {
+                console.log(`🚚 MOVING LEAD TO MASTERSHOP (Pipeline: ${ID_PIPELINE_MASTERSHOP})...`);
+                
+                await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+                    pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
+                    status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
+                }, { headers: { Authorization: `Bearer ${token}` } });
+                
+                console.log("✅ TRANSFER COMPLETE. Lead left the chatbot.");
+                return; // ⛔ STOP HERE. Don't trigger salesbot in old pipeline.
+            } else {
+                console.warn("⚠️ Lead saved but NOT moved (Missing Mastershop IDs in Code).");
+            }
 
-        // 4. MANIOBRA DE DISPARO (RETROCESO -> AVANCE)
-        const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
-        const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
+        } else {
+            // ==========================================
+            // 💬 CHAT MODE (QUALIFYING)
+            // ==========================================
+            let finalText = aiResponse.content || "...";
+            finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
+            
+            await updateAiResponseField(leadId, finalText, token);
 
-        // Solo hacemos el movimiento si NO queremos loops infinitos de movimiento
-        // Si el lead ya está en "Cualificando", lo movemos atrás y adelante
-        // Si está en "Entrada", solo lo movemos adelante
-        
-        if (leadData.status_id == stageCualificando) {
-            console.log("🔙 Stepping back...");
-            await axios.patch(updateUrl, { status_id: stageEntrada }, { headers: { Authorization: `Bearer ${token}` } });
-            await sleep(2000);
+            // 4. TRIGGER SALESBOT (Only in Qualifying Mode)
+            const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
+            const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
+
+            if (leadData.status_id == stageCualificando) {
+                await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
+                    { status_id: stageEntrada }, 
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+                await sleep(2000);
+            }
+
+            console.log("🔫 Firing Salesbot...");
+            await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
+                { status_id: stageCualificando }, 
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
         }
-
-        console.log("🔫 Firing Salesbot...");
-        await axios.patch(updateUrl, { status_id: stageCualificando }, { headers: { Authorization: `Bearer ${token}` } });
 
     } catch (e) {
         console.error("❌ Process Error:", e.message);
     }
+}
+
+async function handleOrderCreation(leadId, args, token) {
+    try {
+        console.log("📝 Saving Order Data...");
+        const quantity = args.cantidad_productos || 1;
+        const totalValue = quantity * PRODUCT_PRICE;
+
+        const customFields = [
+            { field_id: FIELDS.NOMBRE, values: [{ value: args.nombre }] },
+            { field_id: FIELDS.APELLIDO, values: [{ value: args.apellido }] },
+            { field_id: FIELDS.CEDULA, values: [{ value: args.cedula }] },
+            { field_id: FIELDS.TELEFONO, values: [{ value: args.telefono }] },
+            { field_id: FIELDS.CORREO, values: [{ value: args.email || "noaplica@copacol.com" }] },
+            { field_id: FIELDS.DEPARTAMENTO, values: [{ value: args.departamento }] },
+            { field_id: FIELDS.CIUDAD, values: [{ value: args.ciudad }] },
+            { field_id: FIELDS.DIRECCION, values: [{ value: args.direccion }] },
+            { field_id: FIELDS.INFO_ADICIONAL, values: [{ value: args.info_adicional || "-" }] },
+            { field_id: FIELDS.FORMA_PAGO, values: [{ value: "Pago Contra Entrega (Con recaudo)" }] },
+            { field_id: FIELDS.VALOR_TOTAL, values: [{ value: totalValue }] }
+        ];
+
+        await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+            price: totalValue, 
+            custom_fields_values: customFields
+        }, { headers: { Authorization: `Bearer ${token}` } });
+        console.log("✅ Lead Fields Saved.");
+
+        await axios.post(`https://${API_DOMAIN}/api/v4/leads/${leadId}/link`, [
+            {
+                to_entity_id: PRODUCT_ID,
+                to_entity_type: "catalog_elements",
+                metadata: { quantity: quantity, catalog_id: 12053 }
+            }
+        ], { headers: { Authorization: `Bearer ${token}` } });
+        console.log("✅ Product Linked.");
+
+    } catch (error) {
+        console.error("⚠️ Partial Save Error:", error.response?.data || error.message);
+    }
+}
+
+async function updateAiResponseField(leadId, text, token) {
+    const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
+    if (!fieldId) return;
+
+    await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+        custom_fields_values: [
+            { field_id: fieldId, values: [{ value: text }] }
+        ]
+    }, { headers: { Authorization: `Bearer ${token}` } });
+    console.log(`📝 AI Response Updated.`);
 }
 
 const PORT = process.env.PORT || 3000;
