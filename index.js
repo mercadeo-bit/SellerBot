@@ -10,13 +10,18 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
+
+// ----------------------------------------------------
+// ⚙️ CONFIGURATION
+// ----------------------------------------------------
 const PRODUCT_ID = 1755995; 
 const PRODUCT_PRICE = 319900; 
 
-// CONFIGURACIÓN MASTERSHOP
+// Mastershop Config
 const ID_PIPELINE_MASTERSHOP = 12631352; 
 const ID_STATUS_INICIAL_MASTERSHOP = 97525680;
 
+// Lead Fields Map
 const FIELDS = {
     NOMBRE: 2099831,
     APELLIDO: 2099833,
@@ -33,7 +38,7 @@ const FIELDS = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI Integrator (MEMORY FIX v2) UP 🟢'));
+app.get('/', (req, res) => res.send('Copacol AI: Dynamic Field Version UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -45,7 +50,6 @@ app.post('/webhook', async (req, res) => {
             const msg = body.message.add[0];
             if (msg.type === 'incoming') {
                 console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}`);
-                // Don't wait for processing to send 200 OK to Kommo
                 processSmartFieldReply(msg.entity_id, msg.text).catch(err => 
                     console.error("❌ Async Process Error:", err.message)
                 );
@@ -65,9 +69,7 @@ async function processSmartFieldReply(leadId, incomingText) {
     });
     const leadData = leadRes.data;
     
-    // ============================================================
-    // ⛔ FILTRO DE SEGURIDAD ESTRICTO
-    // ============================================================
+    // 🛡️ SECURITY AUDIT (Strict Pipeline Check)
     const REQUIRED_PIPELINE = String(process.env.PIPELINE_ID_VENTAS).trim(); 
     const CURRENT_PIPELINE = String(leadData.pipeline_id || 0);
 
@@ -75,20 +77,18 @@ async function processSmartFieldReply(leadId, incomingText) {
         console.log(`⛔ SKIP: Lead in Pipeline ${CURRENT_PIPELINE} (Expected: ${REQUIRED_PIPELINE})`);
         return; 
     }
-
     console.log(`✅ ACCESS GRANTED. Processing logic...`);
 
-    // 2. RECUPERAR CONTEXTO (MEMORY FIX 🧠)
+    // 2. RECUPERAR CONTEXTO (The "Bobo" Fix included)
     console.log(`📜 Fetching conversation history...`);
     const history = await getConversationHistory(leadId, token);
-    console.log(`   Found ${history.length} previous messages.`);
 
     // 3. GENERACIÓN IA
     const aiResponse = await analizarMensaje(history, incomingText);
 
-    // 4. EJECUCIÓN (ACCIÓN O CHAT)
+    // 4. EJECUCIÓN
     if (aiResponse.tool_calls) {
-        // --- MODO ACCIÓN: FINALIZAR COMPRA ---
+        // --- MODO ACCIÓN (Finalizar Compra) ---
         console.log("🛠️ AI Action: Finalizar Compra");
         
         const toolArgs = JSON.parse(aiResponse.tool_calls[0].function.arguments);
@@ -98,21 +98,23 @@ async function processSmartFieldReply(leadId, incomingText) {
 
         if (ID_PIPELINE_MASTERSHOP !== 0 && ID_STATUS_INICIAL_MASTERSHOP !== 0) {
             console.log(`🚚 MOVING TO MASTERSHOP...`);
-            await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
-                pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
-                status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
-            }, { headers: { Authorization: `Bearer ${token}` } });
+            try {
+                await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+                    pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
+                    status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
+                }, { headers: { Authorization: `Bearer ${token}` } });
+            } catch (e) { console.error("⚠️ Move Error:", e.message); }
         }
 
     } else {
-        // --- MODO CHAT: RESPONDER ---
+        // --- MODO CHAT ---
         let finalText = aiResponse.content || "...";
         finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
-        if (finalText.length > 250) finalText = finalText.substring(0, 248) + "..";
         
+        // ✂️ REMOVED THE LIMIT. NOW SENDING FULL TEXT TO VARIABLE FIELD.
         await updateAiResponseField(leadId, finalText, token);
 
-        // GATILLO DE SALESBOT (Retroceso -> Avance)
+        // Salesbot Trigger (Round-Trip)
         const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
         const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
 
@@ -134,66 +136,73 @@ async function processSmartFieldReply(leadId, incomingText) {
 }
 
 // ---------------------------------------------------------
-// 🧠 HELPER: CONTEXT RETRIEVAL FROM KOMMO EVENTS
+// 🧠 HELPER: CONTEXT RETRIEVAL (WIDE NET VERSION)
 // ---------------------------------------------------------
 async function getConversationHistory(leadId, token) {
     try {
-        // STRATEGY: Don't filter by type in the URL. Get EVERYTHING (Limit 50).
-        // This avoids 400 errors and empty lists due to strict API matching.
         const url = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=50`;
-        
-        const res = await axios.get(url, { 
-            headers: { Authorization: `Bearer ${token}` } 
-        });
+        const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
 
-        if (!res.data || !res.data._embedded || !res.data._embedded.events) {
-            console.log("   ⚠️ No events found in Kommo API response.");
-            return [];
-        }
+        if (!res.data || !res.data._embedded || !res.data._embedded.events) return [];
 
         const events = res.data._embedded.events;
         const messages = [];
 
-        // Events come Newest -> Oldest. We reverse them for OpenAI.
         for (const ev of events.reverse()) {
-            // DEBUG: See what types appear in your Railway logs (remove later if too noisy)
-            // console.log(`   🔎 Analyzing Event: ${ev.type}`);
-
             let role = '';
             let content = '';
 
-            // 1. Detect User Messages
+            // Detect User
             if (ev.type === 'incoming_chat_message' || ev.type === 'chat_message' || ev.type === 'incoming_sms') {
                 role = 'user';
                 content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             } 
-            // 2. Detect Bot/Agent Messages
+            // Detect Bot
             else if (ev.type === 'outgoing_chat_message' || ev.type === 'outgoing_sms') {
                 role = 'assistant';
                 content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             }
 
-            // Fallback for weird text storage locations
+            // Fallbacks & Cleanup
             if (!content && typeof ev.value === 'string') content = ev.value;
 
-            // 3. Add to List if valid text
             if (role && content && typeof content === 'string') {
-                 // Clean HTML
                  content = content.replace(/<[^>]*>?/gm, '').trim();
-                 
-                 // Skip status updates or empty messages
                  if (content.length > 0 && !content.includes("updated the stage")) {
                      messages.push({ role, content });
                  }
             }
         }
-        
-        console.log(`   ✅ Loaded ${messages.length} valid chat messages from history.`);
+        console.log(`   ✅ History: ${messages.length} msgs loaded.`);
         return messages;
-
     } catch (err) {
-        console.error("⚠️ Failed to fetch history:", err.message);
+        console.error("⚠️ History fetch warning:", err.message);
         return []; 
+    }
+}
+
+// ---------------------------------------------------------
+// 🛠️ UTILS & ACTION HANDLERS
+// ---------------------------------------------------------
+
+async function updateAiResponseField(leadId, text, token) {
+    try {
+        // DYNAMIC FIELD ID from ENV 🌍
+        const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
+
+        if (!fieldId) {
+            console.error("❌ ERROR: process.env.FIELD_ID_RESPUESTA_IA is missing or invalid!");
+            return;
+        }
+
+        await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+            custom_fields_values: [
+                { field_id: fieldId, values: [{ value: text }] }
+            ]
+        }, { headers: { Authorization: `Bearer ${token}` } });
+        console.log(`📝 Updated IA Field [${fieldId}] (Length: ${text.length} chars)`);
+    } catch(e) {
+        console.error("❌ Field Update Failed:", e.message);
     }
 }
 
@@ -222,7 +231,6 @@ async function handleOrderCreation(leadId, args, token) {
             custom_fields_values: customFields
         }, { headers: { Authorization: `Bearer ${token}` } });
         
-        // Try linking the catalog item
         try {
             await axios.post(`https://${API_DOMAIN}/api/v4/leads/${leadId}/link`, [
                 {
@@ -231,35 +239,17 @@ async function handleOrderCreation(leadId, args, token) {
                     metadata: { quantity: quantity, catalog_id: 77598 }
                 }
             ], { headers: { Authorization: `Bearer ${token}` } });
-        } catch(linkErr) {
-            console.log("⚠️ Catalog Link warning (ignorable):", linkErr.response?.data || linkErr.message);
-        }
+        } catch(e) { /* ignore catalog error */ }
         
-        console.log("✅ Order Data Linked.");
+        console.log("✅ Order Data Saved.");
 
     } catch (error) {
         console.error("⚠️ Order Save Error:", error.response?.data || error.message);
     }
 }
 
-async function updateAiResponseField(leadId, text, token) {
-    const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
-    if (!fieldId) { console.error("❌ MISSING VAR: FIELD_ID_RESPUESTA_IA"); return; }
-
-    try {
-        await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
-            custom_fields_values: [
-                { field_id: fieldId, values: [{ value: text }] }
-            ]
-        }, { headers: { Authorization: `Bearer ${token}` } });
-        console.log(`📝 Field Updated: "${text.substring(0, 20)}..."`);
-    } catch(e) {
-        console.error("❌ Failed to update Response Field:", e.message);
-    }
-}
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`🚀 Copacol Server READY on port ${PORT}`);
-    try { await getAccessToken(); console.log("✅ OAuth Token Verified."); } catch (e) { console.log("⚠️ Auth check failed on boot (normal if first run)"); }
+    try { await getAccessToken(); console.log("✅ OAuth Token Verified."); } catch (e) { }
 });
