@@ -138,58 +138,61 @@ async function processSmartFieldReply(leadId, incomingText) {
 // ---------------------------------------------------------
 async function getConversationHistory(leadId, token) {
     try {
-        // FIXED URL: 
-        // 1. Changed 'chat_message' -> 'incoming_chat_message'
-        // 2. Used array syntax 'filter[type][]' to prevent 400 Bad Request errors on strict parsing
-        const url = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=10&filter[type][]=incoming_chat_message&filter[type][]=outgoing_chat_message`;
+        // STRATEGY: Don't filter by type in the URL. Get EVERYTHING (Limit 50).
+        // This avoids 400 errors and empty lists due to strict API matching.
+        const url = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=50`;
         
         const res = await axios.get(url, { 
             headers: { Authorization: `Bearer ${token}` } 
         });
 
         if (!res.data || !res.data._embedded || !res.data._embedded.events) {
+            console.log("   ⚠️ No events found in Kommo API response.");
             return [];
         }
 
         const events = res.data._embedded.events;
         const messages = [];
 
-        // Events come Newest -> Oldest. We reverse them to feed OpenAI chronologically.
+        // Events come Newest -> Oldest. We reverse them for OpenAI.
         for (const ev of events.reverse()) {
-            let role = 'user';
+            // DEBUG: See what types appear in your Railway logs (remove later if too noisy)
+            // console.log(`   🔎 Analyzing Event: ${ev.type}`);
+
+            let role = '';
             let content = '';
 
-            // Extract content safely
-            if (ev.type === 'incoming_chat_message') {
+            // 1. Detect User Messages
+            if (ev.type === 'incoming_chat_message' || ev.type === 'chat_message' || ev.type === 'incoming_sms') {
                 role = 'user';
-                // Try to find text in different standard Kommo paths
                 content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             } 
-            else if (ev.type === 'outgoing_chat_message') {
+            // 2. Detect Bot/Agent Messages
+            else if (ev.type === 'outgoing_chat_message' || ev.type === 'outgoing_sms') {
                 role = 'assistant';
                 content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             }
 
-            // Fallback for simple values
+            // Fallback for weird text storage locations
             if (!content && typeof ev.value === 'string') content = ev.value;
 
-            // Clean & Add
-            if (content && typeof content === 'string') {
-                 // Remove HTML tags often left by Kommo (e.g. <p>)
+            // 3. Add to List if valid text
+            if (role && content && typeof content === 'string') {
+                 // Clean HTML
                  content = content.replace(/<[^>]*>?/gm, '').trim();
                  
-                 // Skip system status messages if any sneak in
+                 // Skip status updates or empty messages
                  if (content.length > 0 && !content.includes("updated the stage")) {
                      messages.push({ role, content });
                  }
             }
         }
         
+        console.log(`   ✅ Loaded ${messages.length} valid chat messages from history.`);
         return messages;
 
     } catch (err) {
-        // Detailed error logging to see exactly why it fails if it happens again
-        console.error("⚠️ Failed to fetch history:", err.response?.data ? JSON.stringify(err.response.data) : err.message);
+        console.error("⚠️ Failed to fetch history:", err.message);
         return []; 
     }
 }
