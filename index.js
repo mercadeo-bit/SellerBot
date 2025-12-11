@@ -138,8 +138,10 @@ async function processSmartFieldReply(leadId, incomingText) {
 // ---------------------------------------------------------
 async function getConversationHistory(leadId, token) {
     try {
-        // We fetch the last 15 events for this lead to construct the chat history
-        const url = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=15&filter[type]=chat_message,outgoing_chat_message`;
+        // FIXED URL: 
+        // 1. Changed 'chat_message' -> 'incoming_chat_message'
+        // 2. Used array syntax 'filter[type][]' to prevent 400 Bad Request errors on strict parsing
+        const url = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=10&filter[type][]=incoming_chat_message&filter[type][]=outgoing_chat_message`;
         
         const res = await axios.get(url, { 
             headers: { Authorization: `Bearer ${token}` } 
@@ -152,45 +154,43 @@ async function getConversationHistory(leadId, token) {
         const events = res.data._embedded.events;
         const messages = [];
 
-        // Events come newest first. We need to reverse them for OpenAI (Oldest -> Newest)
+        // Events come Newest -> Oldest. We reverse them to feed OpenAI chronologically.
         for (const ev of events.reverse()) {
             let role = 'user';
             let content = '';
 
-            // Note: Data structure depends on Kommo Integration type.
-            // Typically 'chat_message' is User, 'outgoing_chat_message' is Bot/Agent
-            
-            if (ev.type === 'chat_message' || ev.type === 'incoming_chat_message') {
+            // Extract content safely
+            if (ev.type === 'incoming_chat_message') {
                 role = 'user';
-                // Try to find the text. Sometimes it's in value, sometimes note[text]
-                content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text || ""; 
-                // Fallback for simple webhook events that log as notes
-                if (!content && typeof ev.value === 'string') content = ev.value;
+                // Try to find text in different standard Kommo paths
+                content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             } 
             else if (ev.type === 'outgoing_chat_message') {
                 role = 'assistant';
-                content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text || ""; 
+                content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             }
 
-            // Cleanup content
-            if (content && typeof content === 'string' && !content.includes("updated the stage")) {
-                 // Remove simple HTML tags if Kommo stores them
-                 content = content.replace(/<[^>]*>?/gm, '');
-                 if (content.trim().length > 0) {
+            // Fallback for simple values
+            if (!content && typeof ev.value === 'string') content = ev.value;
+
+            // Clean & Add
+            if (content && typeof content === 'string') {
+                 // Remove HTML tags often left by Kommo (e.g. <p>)
+                 content = content.replace(/<[^>]*>?/gm, '').trim();
+                 
+                 // Skip system status messages if any sneak in
+                 if (content.length > 0 && !content.includes("updated the stage")) {
                      messages.push({ role, content });
                  }
             }
         }
         
-        // Remove the very last message if it matches the current incoming message to avoid duplication?
-        // Actually, 'events' API usually has a slight delay, so the current webhook msg might NOT be there yet.
-        // It is safer to just return what we found.
-        
         return messages;
 
     } catch (err) {
-        console.error("⚠️ Failed to fetch history:", err.message);
-        return []; // Fallback to no memory if API fails
+        // Detailed error logging to see exactly why it fails if it happens again
+        console.error("⚠️ Failed to fetch history:", err.response?.data ? JSON.stringify(err.response.data) : err.message);
+        return []; 
     }
 }
 
