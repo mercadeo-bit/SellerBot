@@ -13,7 +13,7 @@ const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
 const PRODUCT_ID = 1755995; 
 const PRODUCT_PRICE = 319900; 
 
-// === IDS DE MASTERSHOP (CONFIGURACIÓN) ===
+// CONFIGURACIÓN MASTERSHOP
 const ID_PIPELINE_MASTERSHOP = 12631352; 
 const ID_STATUS_INICIAL_MASTERSHOP = 97525680;
 
@@ -33,7 +33,7 @@ const FIELDS = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI Integrator (Secured) UP 🟢'));
+app.get('/', (req, res) => res.send('Copacol AI Integrator (STRICT MODE) UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -57,89 +57,82 @@ async function processSmartFieldReply(leadId, incomingText) {
     try {
         const token = await getAccessToken();
 
-        // 1. VERIFICAR PIPELINE ACTUAL
+        // 1. OBTENER INFORMACIÓN DEL LEAD
         const leadRes = await axios.get(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { 
             headers: { Authorization: `Bearer ${token}` } 
         });
         const leadData = leadRes.data;
         
-        const targetPipeline = parseInt(process.env.PIPELINE_ID_VENTAS);
-        const currentPipeline = leadData.pipeline_id ? parseInt(leadData.pipeline_id) : 0;
+        // ============================================================
+        // ⛔ FILTRO DE SEGURIDAD ESTRICTO (MANDATORY)
+        // ============================================================
+        
+        // Convertimos a String para asegurar comparación exacta texto-texto
+        const REQUIRED_PIPELINE = String(process.env.PIPELINE_ID_VENTAS).trim(); 
+        const CURRENT_PIPELINE = String(leadData.pipeline_id || 0); // Si es null/undefined se vuelve "0"
 
-        if (currentPipeline !== targetPipeline) {
-            console.log(`🛑 IGNORED: Lead is in Pipeline ${currentPipeline}.`);
-            return;
+        console.log(`🛡️ SECURITY AUDIT for Lead ${leadId}:`);
+        console.log(`   Expected Pipeline: [${REQUIRED_PIPELINE}]`);
+        console.log(`   Actual Pipeline:   [${CURRENT_PIPELINE}]`);
+
+        if (CURRENT_PIPELINE !== REQUIRED_PIPELINE) {
+            console.log(`⛔ ACCESO DENEGADO: El lead está en pipeline ${CURRENT_PIPELINE}. Se requiere ${REQUIRED_PIPELINE}. IGNORANDO.`);
+            return; // 💀 MUERTE AL PROCESO AQUÍ MISMO.
         }
 
-        console.log(`✅ ACCESS GRANTED. Processing...`);
+        console.log(`✅ ACCESO CONCEDIDO: Pipeline coincide. Procesando...`);
 
-        // 2. AI GENERATION
+        // 2. GENERACIÓN IA
         console.log(`🧠 AI Generating response...`);
-        // Currently context is empty (Amnessic mode to prevent large context errors)
         const context = []; 
         const aiResponse = await analizarMensaje(context, incomingText);
 
-        // 3. DECISIÓN: ¿COMANDO DE ACCIÓN O CHAT?
+        // 3. EJECUCIÓN (ACCIÓN O CHAT)
         if (aiResponse.tool_calls) {
-            // ==========================================
-            // 🚀 ACTION MODE (DATA COLLECTED -> MOVE)
-            // ==========================================
-            console.log("🛠️ AI Triggered Action: Finalizar Compra");
+            // MODO ACCIÓN
+            console.log("🛠️ AI Action: Finalizar Compra");
             
-            // A) Save Fields & Link Product
             const toolArgs = JSON.parse(aiResponse.tool_calls[0].function.arguments);
             await handleOrderCreation(leadId, toolArgs, token);
             
-            // B) Confirm to User
-            const confirmationText = "¡Excelente! Tus datos están completos. Generando orden de despacho... 🚚";
-            await updateAiResponseField(leadId, confirmationText, token);
+            await updateAiResponseField(leadId, "¡Excelente! Tus datos están completos. Generando orden de despacho... 🚚", token);
 
-            // C) MOVE TO MASTERSHOP PIPELINE
+            // Mover a MasterShop
             if (ID_PIPELINE_MASTERSHOP !== 0 && ID_STATUS_INICIAL_MASTERSHOP !== 0) {
-                console.log(`🚚 MOVING LEAD TO MASTERSHOP...`);
-                
+                console.log(`🚚 MOVING TO MASTERSHOP...`);
                 try {
                     await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
                         pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
                         status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
                     }, { headers: { Authorization: `Bearer ${token}` } });
-                    
-                    console.log("✅ TRANSFER COMPLETE. Lead left the chatbot.");
-                    return; // ⛔ STOP HERE.
+                    return; 
                 } catch (moveError) {
-                    console.error("⚠️ Error moving lead:", moveError.response?.data || moveError.message);
+                    console.error("⚠️ Error moving lead:", moveError.message);
                 }
             }
 
         } else {
-            // ==========================================
-            // 💬 CHAT MODE (QUALIFYING)
-            // ==========================================
+            // MODO CHAT
             let finalText = aiResponse.content || "...";
             finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
-            
-            // 🛑 SAFETY SCISSORS: CRITICAL FIX FOR 400 ERROR
-            // Kommo only accepts 255 chars in text fields. We cut at 250 to be safe.
-            if (finalText.length > 250) {
-                console.log(`⚠️ Truncating text from ${finalText.length} to 250 chars to prevent Kommo crash.`);
-                finalText = finalText.substring(0, 248) + "..";
-            }
+            if (finalText.length > 250) finalText = finalText.substring(0, 248) + "..";
             
             await updateAiResponseField(leadId, finalText, token);
 
-            // 4. TRIGGER SALESBOT (Only in Qualifying Mode)
+            // GATILLO DE SALESBOT (Retroceso -> Avance)
             const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
             const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
 
             if (leadData.status_id == stageCualificando) {
+                console.log("🔙 Stepping back...");
                 await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
                     { status_id: stageEntrada }, 
                     { headers: { Authorization: `Bearer ${token}` } }
                 );
-                await sleep(2000); // Wait for Kommo to process the move
+                await sleep(1500); 
             }
 
-            console.log("🔫 Firing Salesbot...");
+            console.log("🔫 Firing Salesbot (Forward Move)...");
             await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
                 { status_id: stageCualificando }, 
                 { headers: { Authorization: `Bearer ${token}` } }
@@ -148,10 +141,6 @@ async function processSmartFieldReply(leadId, incomingText) {
 
     } catch (e) {
         console.error("❌ Process Error:", e.message);
-        // Tip: If error is 400, it's usually the field content being invalid/too long
-        if (e.response && e.response.status === 400) {
-            console.error("Data sent:", e.response.config.data);
-        }
     }
 }
 
@@ -179,8 +168,7 @@ async function handleOrderCreation(leadId, args, token) {
             price: totalValue, 
             custom_fields_values: customFields
         }, { headers: { Authorization: `Bearer ${token}` } });
-        console.log("✅ Lead Fields Saved.");
-
+        
         await axios.post(`https://${API_DOMAIN}/api/v4/leads/${leadId}/link`, [
             {
                 to_entity_id: PRODUCT_ID,
@@ -188,23 +176,23 @@ async function handleOrderCreation(leadId, args, token) {
                 metadata: { quantity: quantity, catalog_id: 77598 }
             }
         ], { headers: { Authorization: `Bearer ${token}` } });
-        console.log("✅ Product Linked.");
+        console.log("✅ Order Data Linked.");
 
     } catch (error) {
-        console.error("⚠️ Partial Save Error:", error.response?.data || error.message);
+        console.error("⚠️ Order Save Error:", error.response?.data || error.message);
     }
 }
 
 async function updateAiResponseField(leadId, text, token) {
     const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
-    if (!fieldId) return;
+    if (!fieldId) { console.error("❌ MISSING VAR: FIELD_ID_RESPUESTA_IA"); return; }
 
     await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
         custom_fields_values: [
             { field_id: fieldId, values: [{ value: text }] }
         ]
     }, { headers: { Authorization: `Bearer ${token}` } });
-    console.log(`📝 AI Response Updated.`);
+    console.log(`📝 Field Updated.`);
 }
 
 const PORT = process.env.PORT || 3000;
