@@ -17,11 +17,11 @@ const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
 const PRODUCT_ID = 1755995; 
 const PRODUCT_PRICE = 319900; 
 
-// Mastershop Config
-const ID_PIPELINE_MASTERSHOP = 12631352; 
-const ID_STATUS_INICIAL_MASTERSHOP = 97525680;
+// Mastershop Pipelines
+const ID_PIPELINE_MASTERSHOP = 12549896; 
+const ID_STATUS_INICIAL_MASTERSHOP = 96929184;
 
-// Lead Fields Map
+// Lead Fields Map (User Provided)
 const FIELDS = {
     NOMBRE: 2099831,
     APELLIDO: 2099833,
@@ -38,7 +38,7 @@ const FIELDS = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI: Dynamic Field Version UP 🟢'));
+app.get('/', (req, res) => res.send('Copacol AI: Mastershop Full Flow UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -50,6 +50,7 @@ app.post('/webhook', async (req, res) => {
             const msg = body.message.add[0];
             if (msg.type === 'incoming') {
                 console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}`);
+                // Fire and forget (don't block web request)
                 processSmartFieldReply(msg.entity_id, msg.text).catch(err => 
                     console.error("❌ Async Process Error:", err.message)
                 );
@@ -79,60 +80,85 @@ async function processSmartFieldReply(leadId, incomingText) {
     }
     console.log(`✅ ACCESS GRANTED. Processing logic...`);
 
-    // 2. RECUPERAR CONTEXTO (The "Bobo" Fix included)
+    // 2. RECUPERAR CONTEXTO & DEDUPLICAR
     console.log(`📜 Fetching conversation history...`);
     const history = await getConversationHistory(leadId, token);
+
+    // DEDUPLICATION: If the last memory is the same as the current msg, remove it so AI doesn't see double.
+    if (history.length > 0) {
+        const lastMsg = history[history.length - 1];
+        if (lastMsg.role === 'user' && incomingText && lastMsg.content.trim() === incomingText.trim()) {
+            console.log("   ✂️ Deduplicating: Ignoring redundant history message.");
+            history.pop();
+        }
+    }
 
     // 3. GENERACIÓN IA
     const aiResponse = await analizarMensaje(history, incomingText);
 
-    // 4. EJECUCIÓN
+    // 4. EJECUCIÓN (Action vs Chat)
     if (aiResponse.tool_calls) {
-        // --- MODO ACCIÓN (Finalizar Compra) ---
+        // ===========================================
+        // 🛠️ MODO ACCIÓN: FINALIZAR COMPRA
+        // ===========================================
         console.log("🛠️ AI Action: Finalizar Compra");
         
         const toolArgs = JSON.parse(aiResponse.tool_calls[0].function.arguments);
         await handleOrderCreation(leadId, toolArgs, token);
         
-        await updateAiResponseField(leadId, "¡Excelente! Tus datos están completos. Generando orden de despacho... 🚚", token);
+        // Confirmation Message
+        const confirmationText = `¡Listo ${toolArgs.nombre}! 🎉\n\nTu orden ha sido registrada exitosamente. Vamos a procesar tu envío a la dirección: ${toolArgs.direccion}, ${toolArgs.ciudad}.\n\nSi tienes preguntas adicionales, un asesor humano revisará este chat pronto. ¡Gracias por confiar en Copacol!`;
+        
+        await updateAiResponseField(leadId, confirmationText, token);
 
+        // Send the confirmation immediately
+        await triggerSalesbotLoop(leadId, leadData.status_id, token);
+
+        // MOVE TO MASTERSHOP
         if (ID_PIPELINE_MASTERSHOP !== 0 && ID_STATUS_INICIAL_MASTERSHOP !== 0) {
-            console.log(`🚚 MOVING TO MASTERSHOP...`);
+            console.log(`🚚 MOVING TO MASTERSHOP PIPELINE...`);
             try {
+                // Wait 4 seconds to let the message send before moving
+                await sleep(4000); 
                 await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
                     pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
                     status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
                 }, { headers: { Authorization: `Bearer ${token}` } });
+                console.log("✅ Lead Moved Successfully.");
             } catch (e) { console.error("⚠️ Move Error:", e.message); }
         }
 
     } else {
-        // --- MODO CHAT ---
+        // ===========================================
+        // 💬 MODO CHAT: CONVERSACIÓN NORMAL
+        // ===========================================
         let finalText = aiResponse.content || "...";
         finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
         
-        // ✂️ REMOVED THE LIMIT. NOW SENDING FULL TEXT TO VARIABLE FIELD.
         await updateAiResponseField(leadId, finalText, token);
+        await triggerSalesbotLoop(leadId, leadData.status_id, token);
+    }
+}
 
-        // Salesbot Trigger (Round-Trip)
-        const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
-        const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
+// Helper to Trigger Kommo Salesbot (Status toggle)
+async function triggerSalesbotLoop(leadId, currentStatus, token) {
+    const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
+    const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
 
-        if (leadData.status_id == stageCualificando) {
-            console.log("🔙 Stepping back (Trigger Loop)...");
-            await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
-                { status_id: stageEntrada }, 
-                { headers: { Authorization: `Bearer ${token}` } }
-            );
-            await sleep(1500); 
-        }
-
-        console.log("🔫 Firing Salesbot (Forward Move)...");
+    if (currentStatus == stageCualificando) {
+        console.log("🔙 Stepping back...");
         await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
-            { status_id: stageCualificando }, 
+            { status_id: stageEntrada }, 
             { headers: { Authorization: `Bearer ${token}` } }
         );
+        await sleep(1500); 
     }
+
+    console.log("🔫 Firing Salesbot (Forward Move)...");
+    await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
+        { status_id: stageCualificando }, 
+        { headers: { Authorization: `Bearer ${token}` } }
+    );
 }
 
 // ---------------------------------------------------------
@@ -148,32 +174,34 @@ async function getConversationHistory(leadId, token) {
         const events = res.data._embedded.events;
         const messages = [];
 
+        // Reverse to get Chronological order
         for (const ev of events.reverse()) {
             let role = '';
             let content = '';
 
-            // Detect User
+            // User Msgs
             if (ev.type === 'incoming_chat_message' || ev.type === 'chat_message' || ev.type === 'incoming_sms') {
                 role = 'user';
                 content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             } 
-            // Detect Bot
+            // Bot Msgs
             else if (ev.type === 'outgoing_chat_message' || ev.type === 'outgoing_sms') {
                 role = 'assistant';
                 content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             }
 
-            // Fallbacks & Cleanup
+            // Cleanup
             if (!content && typeof ev.value === 'string') content = ev.value;
 
             if (role && content && typeof content === 'string') {
                  content = content.replace(/<[^>]*>?/gm, '').trim();
-                 if (content.length > 0 && !content.includes("updated the stage")) {
+                 // Filter System/Noise
+                 if (content.length > 1 && !content.includes("updated the stage")) {
                      messages.push({ role, content });
                  }
             }
         }
-        console.log(`   ✅ History: ${messages.length} msgs loaded.`);
+        console.log(`   ✅ History Loaded: ${messages.length} messages.`);
         return messages;
     } catch (err) {
         console.error("⚠️ History fetch warning:", err.message);
@@ -182,28 +210,21 @@ async function getConversationHistory(leadId, token) {
 }
 
 // ---------------------------------------------------------
-// 🛠️ UTILS & ACTION HANDLERS
+// 🛠️ DATA SAVER
 // ---------------------------------------------------------
 
 async function updateAiResponseField(leadId, text, token) {
     try {
-        // DYNAMIC FIELD ID from ENV 🌍
-        const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
-
-        if (!fieldId) {
-            console.error("❌ ERROR: process.env.FIELD_ID_RESPUESTA_IA is missing or invalid!");
-            return;
-        }
+        const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA); // Make sure this is 2100125 in ENV
+        if (!fieldId) return;
 
         await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
             custom_fields_values: [
                 { field_id: fieldId, values: [{ value: text }] }
             ]
         }, { headers: { Authorization: `Bearer ${token}` } });
-        console.log(`📝 Updated IA Field [${fieldId}] (Length: ${text.length} chars)`);
-    } catch(e) {
-        console.error("❌ Field Update Failed:", e.message);
-    }
+        console.log(`📝 Field Updated.`);
+    } catch(e) { console.error("❌ Field Update Failed:", e.message); }
 }
 
 async function handleOrderCreation(leadId, args, token) {
@@ -226,11 +247,13 @@ async function handleOrderCreation(leadId, args, token) {
             { field_id: FIELDS.VALOR_TOTAL, values: [{ value: totalValue }] }
         ];
 
+        // Save fields
         await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
             price: totalValue, 
             custom_fields_values: customFields
         }, { headers: { Authorization: `Bearer ${token}` } });
         
+        // Link Catalog Item
         try {
             await axios.post(`https://${API_DOMAIN}/api/v4/leads/${leadId}/link`, [
                 {
@@ -239,9 +262,9 @@ async function handleOrderCreation(leadId, args, token) {
                     metadata: { quantity: quantity, catalog_id: 77598 }
                 }
             ], { headers: { Authorization: `Bearer ${token}` } });
-        } catch(e) { /* ignore catalog error */ }
+        } catch(e) { /* ignore catalog link error */ }
         
-        console.log("✅ Order Data Saved.");
+        console.log("✅ Order Data & Catalog Linked.");
 
     } catch (error) {
         console.error("⚠️ Order Save Error:", error.response?.data || error.message);

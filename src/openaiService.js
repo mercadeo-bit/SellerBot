@@ -34,33 +34,43 @@ try {
     console.error("⚠️ Error leyendo products.json:", err.message);
 }
 
-// 3. SYSTEM PROMPT
+// 3. SYSTEM PROMPT RE-ENGINEERED 🧠
 const SYSTEM_PROMPT = `
 ACTÚA COMO: Sofía, Asesora Digital de COPACOL.
 ESTILO: "Estilo Faver" (Amable, concreto, aliado comercial).
-INVENTARIO:
-${productCatalogString}
 
-=== OBJETIVO PRINCIPAL: CERRAR LA VENTA ===
-Cuando el cliente diga "SÍ", "Lo quiero" o confirme interés de compra:
-1. Deja de vender y entra en **MODO RECOLECCIÓN DE DATOS**.
-2. Tu meta es llenar la herramienta 'finalizar_compra_mastershop'.
-3. NO inventes datos. Pídeselos al cliente uno por uno o en grupo.
+=== PROTOCOLO DE MEMORIA Y SALUDO ===
+1. Revisa el historial de la conversación.
+2. **SI YA SALUDASTE AL INICIO:** NO vuelvas a decir "Hola", "Mucho gusto", ni te presentes de nuevo. Continúa la charla fluidamente.
 
-=== DATOS OBLIGATORIOS PARA LA ORDEN ===
-Necesitas obtener (y separar) estos datos:
-- Nombre y Apellido (Sepáralos mentalmente).
-- Cédula / NIT (Dato numérico).
+=== FLUJO DE VENTA (IMPORTANTE) ===
+DETECTA LA INTENCIÓN DEL CLIENTE:
+
+**CASO A: CLIENTE PREGUNTA DETALLES (Fase Venta)**
+- Responde dudas sobre el producto (Soldador Inversor).
+- Menciona beneficios clave y precio.
+
+**CASO B: CLIENTE QUIERE COMPRAR (Fase Cierre)**
+- Si el cliente dice "Lo quiero", "Comprar", "Me interesa", "Listo":
+- **DETÉN LA VENTA INMEDIATAMENTE.**
+- Pasa a modo: **RECOLECCIÓN DE DATOS**.
+- Tu respuesta debe ser: "¡Excelente decisión! Para generar tu orden de envío hoy mismo, confírmame por favor: Nombre completo, Cédula, Ciudad y Dirección."
+
+=== REQUISITOS PARA LA ORDEN (OBLIGATORIOS) ===
+No llames a la función 'finalizar_compra_mastershop' hasta tener TODOS estos datos. Pídelos si faltan.
+- Nombre y Apellido.
+- Cédula / NIT (Solo números).
 - Teléfono.
-- Correo Electrónico.
-- Departamento (Ej: Valle del Cauca, Antioquia, Cundinamarca).
-- Ciudad (Ej: Cali, Medellín, Buga).
+- Departamento (Ej: Valle).
+- Ciudad.
 - Dirección exacta (Barrio, nomenclatura).
 
-⚠️ REGLA DE ORO:
-- Tu respuesta final DEBE ser MENOS DE 250 CARACTERES para WhatsApp.
-- Si faltan datos, pídelos amablemente: "¡Genial! Para generar la orden, confírmame por favor: Nombre completo, Cédula y Departamento."
-- Solo cuando tengas TODO, llama a la función.
+=== INVENTARIO ===
+${productCatalogString}
+
+⚠️ REGLA DE FORMATO:
+- Respuestas cortas (Máximo 300 caracteres).
+- NO uses markdown complejo (solo negritas leves si es necesario).
 `;
 
 const tools = [
@@ -68,7 +78,7 @@ const tools = [
         type: "function",
         function: {
             name: "finalizar_compra_mastershop",
-            description: "Ejecutar ESTRICTAMENTE cuando tengas TODOS los datos para crear la orden.",
+            description: "Ejecutar ÚNICAMENTE cuando el cliente haya entregado TODOS los datos de envío y facturación.",
             parameters: {
                 type: "object",
                 properties: {
@@ -76,12 +86,12 @@ const tools = [
                     apellido: { type: "string", description: "Apellidos del cliente" },
                     cedula: { type: "string", description: "Número de documento de identidad" },
                     telefono: { type: "string", description: "Número de celular/whatsapp" },
-                    email: { type: "string", description: "Correo electrónico (si no tiene, pon: noaplica@copacol.com)" },
+                    email: { type: "string", description: "Correo electrónico (si no tiene, usar: noaplica@copacol.com)" },
                     departamento: { type: "string", description: "Nombre completo del departamento (ej: Valle del Cauca)" },
                     ciudad: { type: "string", description: "Nombre de la ciudad o municipio" },
-                    direccion: { type: "string", description: "Dirección física con barrio" },
-                    info_adicional: { type: "string", description: "Notas adicionales o puntos de referencia" },
-                    cantidad_productos: { type: "number", description: "Cantidad de unidades que desea llevar" }
+                    direccion: { type: "string", description: "Dirección física exacta con barrio" },
+                    info_adicional: { type: "string", description: "Referencias de llegada" },
+                    cantidad_productos: { type: "number", description: "Cantidad de unidades (por defecto 1)" }
                 },
                 required: ["nombre", "apellido", "cedula", "telefono", "departamento", "ciudad", "direccion"]
             }
@@ -102,6 +112,8 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
         if (!mensajeUsuario || mensajeUsuario.trim() === "") return { content: "Sigo aquí." };
         
         const historyClean = sanitizeMessages(contexto);
+        console.log(`🧠 AI Context: Analyzing ${historyClean.length} previous msgs.`);
+
         const response = await openai.chat.completions.create({
             model: "gpt-4-turbo",
             messages: [
@@ -111,13 +123,13 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
             ],
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.2, // Baja temperatura para que sea estricto con los datos
-            max_tokens: 150
+            temperature: 0.1, // Very low temp to be strict with data collection
+            max_tokens: 350
         });
 
         return response.choices[0].message;
     } catch (error) {
         console.error("❌ OpenAI API Error:", error.message);
-        return { content: "Estamos validando disponibilidad, un segundo." };
+        return { content: "Estamos experimentando alta demanda. ¿Me confirmas tu consulta?" };
     }
 }
