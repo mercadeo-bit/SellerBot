@@ -36,7 +36,7 @@ const FIELDS = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI: DEEP DEBUG VERSION 🟢'));
+app.get('/', (req, res) => res.send('Copacol AI: NOTES + EVENTS FIX 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -75,7 +75,7 @@ async function processSmartFieldReply(leadId, incomingText) {
     }
     console.log(`✅ ACCESS GRANTED.`);
 
-    // 2. RECUPERAR CONTEXTO (DEEP DEBUG MODE)
+    // 2. RECUPERAR CONTEXTO (NOW CHECKING NOTES TOO!)
     const history = await getConversationHistory(leadId, token);
 
     // DEDUPLICAR
@@ -83,7 +83,8 @@ async function processSmartFieldReply(leadId, incomingText) {
         const lastMsg = history[history.length - 1];
         const txtA = String(lastMsg.content || "").trim().toLowerCase();
         const txtB = String(incomingText || "").trim().toLowerCase();
-        if (lastMsg.role === 'user' && txtA === txtB) {
+        // Loose comparison to catch duplicates
+        if (lastMsg.role === 'user' && (txtA.includes(txtB) || txtB.includes(txtA))) {
             console.log("   ✂️ Deduplicating: Removed last history message.");
             history.pop();
         }
@@ -99,12 +100,13 @@ async function processSmartFieldReply(leadId, incomingText) {
         const toolArgs = JSON.parse(aiResponse.tool_calls[0].function.arguments);
         await handleOrderCreation(leadId, toolArgs, token);
         
-        const confirmationText = `¡Listo ${toolArgs.nombre}! 🎉\n\nTu orden ha sido registrada exitosamente para enviar a ${toolArgs.ciudad}. Vamos a proceder con el despacho. ¡Gracias por elegir a Copacol! 🙏🏽`;
+        const confirmationText = `¡Listo ${toolArgs.nombre}! 🎉\n\nTu orden ha sido registrada exitosamente. Vamos a procesar tu envío a ${toolArgs.ciudad}. ¡Gracias por confiar en Copacol! 🙏🏽`;
+        
         await updateAiResponseField(leadId, confirmationText, token);
         await triggerSalesbotLoop(leadId, leadData.status_id, token);
 
         if (ID_PIPELINE_MASTERSHOP !== 0 && ID_STATUS_INICIAL_MASTERSHOP !== 0) {
-            console.log(`🚚 MOVING TO MASTERSHOP PIPELINE...`);
+            console.log(`🚚 MOVING TO MASTERSHOP...`);
             try {
                 await sleep(3000); 
                 await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
@@ -140,83 +142,87 @@ async function triggerSalesbotLoop(leadId, currentStatus, token) {
 }
 
 // ---------------------------------------------------------
-// 🧠 HELPER: X-RAY UNIVERSAL PARSER (THE FIX)
+// 🧠 HELPER: HYBRID HISTORY FETCH (NOTES + EVENTS)
 // ---------------------------------------------------------
 async function getConversationHistory(leadId, token) {
+    let allMessages = [];
+
+    // STRATEGY: Try Notes Endpoint FIRST (More reliable for custom integrations)
     try {
-        const url = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=50`;
-        const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
-
-        if (!res.data || !res.data._embedded || !res.data._embedded.events) return [];
-
-        const events = res.data._embedded.events;
-        const messages = [];
-
-        // Reverse to get Chronological order
-        for (const ev of events.reverse()) {
-            let role = '';
-            let content = '';
-
-            // --- ROLE DETECTION ---
-            if (['incoming_chat_message', 'incoming_sms'].includes(ev.type)) role = 'user';
-            else if (['outgoing_chat_message', 'outgoing_sms'].includes(ev.type)) role = 'assistant';
+        const notesUrl = `https://${API_DOMAIN}/api/v4/leads/${leadId}/notes?limit=50`;
+        const notesRes = await axios.get(notesUrl, { headers: { Authorization: `Bearer ${token}` } });
+        
+        if (notesRes.data?._embedded?.notes) {
+            const rawNotes = notesRes.data._embedded.notes.reverse(); // Oldest first
             
-            // Skip irrelevant types
-            if (!role) continue;
-
-            // --- CONTENT X-RAY SEARCH (Checks all known Kommo paths) ---
-            
-            // 1. Standard Note (Most common)
-            if (ev.value_after && ev.value_after[0] && ev.value_after[0].note && ev.value_after[0].note.text) {
-                content = ev.value_after[0].note.text;
-            }
-            // 2. Message Object (WhatsApp Native often hides here)
-            else if (ev.value_after && ev.value_after[0] && ev.value_after[0].message && ev.value_after[0].message.text) {
-                content = ev.value_after[0].message.text;
-            }
-            // 3. Data Text (System events)
-            else if (ev.data && ev.data.text) {
-                content = ev.data.text;
-            }
-            // 4. Value String (SMS/Simple)
-            else if (typeof ev.value === 'string') {
-                content = ev.value;
+            // 🔎 DEBUG: Peek at what types we found
+            if(rawNotes.length > 0) {
+               console.log(`   🔎 RAW TYPES FOUND: ${rawNotes.map(n => n.note_type).slice(0, 5).join(', ')}`);
             }
 
-            // --- CLEANUP ---
-            if (content && typeof content === 'string') {
-                content = content.replace(/<[^>]*>?/gm, '').trim();
-                // Filter noise
-                if (content.length > 1 && !content.includes("updated the stage") && !content.includes("bot started")) {
-                    messages.push({ role, content });
+            for (const n of rawNotes) {
+                let content = '';
+                // 1. Text is often in params.text for Service Messages
+                if (n.params && n.params.text) content = n.params.text;
+                // 2. Or just standard text
+                else if (n.text) content = n.text;
+                
+                // Identify Role based on Type or Content clues
+                // QR Widgets often use 'common' or 'service_message'
+                if (content) {
+                    // HEURISTIC: If text contains "Incoming" or "Outgoing", or rely on note_type
+                    let role = 'user'; // default assumption
+                    
+                    if (n.note_type === 'outgoing_chat_message' || n.note_type === 'call_out') role = 'assistant';
+                    
+                    // Specific check for your "Respuesta IA" logic if stored as a note
+                    // If content starts with "¡Hola" it's likely the bot.
+                    if (content.startsWith("¡Hola! Mi nombre es Sofía")) role = 'assistant';
+
+                    // Clean
+                    content = content.replace(/<[^>]*>?/gm, '').trim();
+                    if (content.length > 2 && !content.includes("bot started")) {
+                         allMessages.push({ role, content });
+                    }
                 }
             }
         }
-        
-        console.log(`   📜 History Check: Found ${messages.length} valid messages.`);
-        
-        // 🔴 DEBUG X-RAY: If 0 messages found, show me WHY by printing the raw object of the last event
-        if (messages.length === 0 && events.length > 0) {
-            console.log("   ⚠️ ZERO MESSAGES FOUND. Dumping raw last event for inspection:");
-            // Find a chat event to dump
-            const chatEvent = events.find(e => e.type.includes('chat') || e.type.includes('sms'));
-            if (chatEvent) {
-                console.log(JSON.stringify(chatEvent, null, 2));
-            } else {
-                console.log("   (No chat events found in the raw list either)");
+    } catch (e) { /* ignore note errors */ }
+
+    // If Notes yielded nothing, try EVENTS (The old way)
+    if (allMessages.length === 0) {
+        try {
+            const eventsUrl = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=50`;
+            const evRes = await axios.get(eventsUrl, { headers: { Authorization: `Bearer ${token}` } });
+            
+            if (evRes.data?._embedded?.events) {
+                const events = evRes.data._embedded.events.reverse();
+                for (const ev of events) {
+                    let role = '';
+                    let content = '';
+
+                    if (['incoming_chat_message', 'incoming_sms'].includes(ev.type)) role = 'user';
+                    else if (['outgoing_chat_message', 'outgoing_sms'].includes(ev.type)) role = 'assistant';
+
+                    if (ev.value_after && ev.value_after[0]?.note?.text) content = ev.value_after[0].note.text;
+                    else if (ev.data?.text) content = ev.data.text;
+
+                    if (role && content) {
+                         content = content.replace(/<[^>]*>?/gm, '').trim();
+                         if (content.length > 1) allMessages.push({ role, content });
+                    }
+                }
             }
-        }
-
-        return messages;
-
-    } catch (err) {
-        console.error("⚠️ History Fetch Error:", err.message);
-        return []; 
+        } catch (e) { /* ignore event errors */ }
     }
+
+    console.log(`   ✅ Hybrid History: Loaded ${allMessages.length} messages.`);
+    return allMessages;
 }
 
+
 // ---------------------------------------------------------
-// 🛠️ DATA SAVER (UPDATED)
+// 🛠️ DATA SAVER
 // ---------------------------------------------------------
 async function updateAiResponseField(leadId, text, token) {
     try {
@@ -233,8 +239,6 @@ async function updateAiResponseField(leadId, text, token) {
 }
 
 async function handleOrderCreation(leadId, args, token) {
-    // ... (This function remains the same as before, no changes needed here) ...
-    // But included for completeness of the file if you copy/paste:
     try {
         console.log("📝 Saving Order Data...");
         const quantity = args.cantidad_productos || 1;
