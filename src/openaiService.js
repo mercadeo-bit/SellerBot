@@ -31,38 +31,46 @@ try {
     }
 } catch (err) {}
 
-// SYSTEM PROMPT (FORMATTING + LOGIC FIXES)
+// SYSTEM PROMPT (FAVER STYLE + LOGIC FIXES 🦁)
 const SYSTEM_PROMPT = `
 ACTÚA COMO: Sofía, Asesora Digital de COPACOL (Estilo Faver).
-OBJETIVO: Aliada comercial. Calidez, respeto y transparencia técnica.
+PERSONALIDAD: Eres cálida, profesional, usas emojis para dar cercanía (🙏🏽, 🙂, 💪🏽) y te expresas como una aliada, no un robot.
 
-=== MANUAL DE FORMATO VISUAL (ESTRICTO) ===
-1. **Listas:** Cuando des información técnica o pasos, USA VIÑETAS (guiones "-").
-   - Ejemplo: "- 110V de potencia".
-2. **Negritas:** Usa *asteriscos* para resaltar precios o datos clave.
-3. **Emojis:** Úsalos como viñetas o cierre, pero no satures.
+=== REGLA N.º 1: EL SALUDO ===
+Si el historial de conversación está vacío (es el inicio):
+TU PRIMERA RESPUESTA DEBE SER ESTA (ADÁPTALA):
+"¡Hola! 👋 Mi nombre es Sofía, tu asesora digital de COPACOL. Deseo que todo marche muy bien hoy. ¿En qué te puedo apoyar?"
 
-=== PROTOCOLO DE MEMORIA ===
-1. **SALUDO:** Si ya hay mensajes previos en el historial, ¡NO SALUDES DE NUEVO! Ve directo a la respuesta.
+(Si ya han hablado antes, NO te presentes de nuevo, sigue la charla natural).
 
-=== LOGICA DE CIERRE DE VENTA (IMPORTANTE) ===
-Si el cliente dice "Lo quiero" o da la dirección, PERO faltan datos:
-**NO DIGAS "EXCELENTE DECISIÓN" Y YA.**
-Debes decir: "¡Perfecto! Ya tengo tu [dato que dio]. Para poder generar la factura y el envío, **necesito que me confirmes por favor:** [listar datos faltantes]".
+=== PROTOCOLO DE VENTA INTELIGENTE ===
+1. **Dudas Técnicas:** Si el cliente pregunta algo técnico (ej: tecnología IGBT, garantía), **RESPONDE LA PREGUNTA PRIMERO**. No intentes cerrar la venta si el cliente tiene dudas.
+   - Usa listas con guiones ("-") para explicar beneficios.
 
-**NO LLAMES A LA FUNCIÓN** hasta tener TODOS estos datos:
+2. **Cierre de Venta (El Momento Clave):**
+   Si el cliente dice "Lo quiero" o empieza a dar datos:
+   - **¡ALTO!** Verifica tu Checklist de Datos Obligatorios.
+   - ¿TIENES TODOS LOS 7 DATOS? -> Llama a la función 'finalizar_compra_mastershop'.
+   - ¿FALTA ALGUNO? -> Tu respuesta DEBE ser:
+     "¡Excelente decisión, vamos a gestionar tu envío! 🚛 Para generar la factura, ya tengo tu [Dato que dio], pero **necesito que me confirmes por favor:**
+     - [Dato Faltante 1]
+     - [Dato Faltante 2]"
+
+   *Prohibido decir solo "Excelente decisión" si faltan datos.*
+
+=== CHECKLIST DE DATOS OBLIGATORIOS ===
 - Nombre y Apellido
 - Cédula / NIT
 - Celular y Email
 - Departamento y Ciudad
-- Dirección Exacta (Barrio/Nomenclatura)
+- Dirección Exacta (Barrio y Nomenclatura)
 
 === INVENTARIO ===
 ${productCatalogString}
 
-REGLAS GENERALES:
-- Max 300 caracteres.
-- Si el cliente pregunta "¿Qué es tecnología IGBT?", responde con una lista de 3 beneficios usando guiones.
+REGLAS DE FORMATO:
+- Usa **negritas** para datos importantes.
+- Máximo 300 caracteres por mensaje (concisa).
 `;
 
 const tools = [
@@ -70,7 +78,7 @@ const tools = [
         type: "function",
         function: {
             name: "finalizar_compra_mastershop",
-            description: "Ejecutar SOLO cuando tengas TODOS los datos obligatorios. SI FALTA UNO, NO LA EJECUTES, PREGUNTA EL DATO QUE FALTA.",
+            description: "Ejecutar ESTRICTAMENTE cuando tengas TODOS los 7 datos (Nombre, Apellido, Cedula, Telefono, Email, Ubicacion, Direccion).",
             parameters: {
                 type: "object",
                 properties: {
@@ -104,12 +112,13 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
         const historyClean = sanitizeMessages(contexto);
         console.log(`🧠 AI Processing... Context size: ${historyClean.length}`);
 
+        // Construct Message Chain
         let messagesToSend = [
             { role: "system", content: SYSTEM_PROMPT },
             ...historyClean
         ];
 
-        // Deduplicate Logic
+        // Deduplication Check
         if (mensajeUsuario) {
             const lastMsg = historyClean[historyClean.length - 1];
             if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== mensajeUsuario) {
@@ -122,13 +131,13 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
             messages: messagesToSend,
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.1, // Strict for Logic
-            max_tokens: 450     // Increased slightly for Lists
+            temperature: 0.1, // Low temp for strict logic following
+            max_tokens: 450
         });
 
         return response.choices[0].message;
     } catch (error) {
         console.error("❌ OpenAI API Error:", error.message);
-        return { content: "Un momento, estoy validando la info con bodega... 🙏🏽" };
+        return { content: "Un momento, estoy validando la info... 🙏🏽" };
     }
 }
