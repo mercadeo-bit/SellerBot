@@ -21,7 +21,7 @@ const PRODUCT_PRICE = 319900;
 const ID_PIPELINE_MASTERSHOP = 12549896; 
 const ID_STATUS_INICIAL_MASTERSHOP = 96929184;
 
-// Lead Fields Map (User Provided)
+// Lead Fields Map
 const FIELDS = {
     NOMBRE: 2099831,
     APELLIDO: 2099833,
@@ -38,7 +38,7 @@ const FIELDS = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI: Mastershop Full Flow UP 🟢'));
+app.get('/', (req, res) => res.send('Copacol AI: Estilo Faver + History Fix UP 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -50,7 +50,6 @@ app.post('/webhook', async (req, res) => {
             const msg = body.message.add[0];
             if (msg.type === 'incoming') {
                 console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}`);
-                // Fire and forget (don't block web request)
                 processSmartFieldReply(msg.entity_id, msg.text).catch(err => 
                     console.error("❌ Async Process Error:", err.message)
                 );
@@ -70,7 +69,7 @@ async function processSmartFieldReply(leadId, incomingText) {
     });
     const leadData = leadRes.data;
     
-    // 🛡️ SECURITY AUDIT (Strict Pipeline Check)
+    // 🛡️ SECURITY AUDIT
     const REQUIRED_PIPELINE = String(process.env.PIPELINE_ID_VENTAS).trim(); 
     const CURRENT_PIPELINE = String(leadData.pipeline_id || 0);
 
@@ -84,11 +83,16 @@ async function processSmartFieldReply(leadId, incomingText) {
     console.log(`📜 Fetching conversation history...`);
     const history = await getConversationHistory(leadId, token);
 
-    // DEDUPLICATION: If the last memory is the same as the current msg, remove it so AI doesn't see double.
+    // DEDUPLICATION LOGIC:
+    // If the last message in history is the same as the new one, remove it to avoid repetition.
     if (history.length > 0) {
         const lastMsg = history[history.length - 1];
-        if (lastMsg.role === 'user' && incomingText && lastMsg.content.trim() === incomingText.trim()) {
-            console.log("   ✂️ Deduplicating: Ignoring redundant history message.");
+        // Normalize strings for comparison (trim + lowercase)
+        const txtA = String(lastMsg.content).trim();
+        const txtB = String(incomingText).trim();
+        
+        if (lastMsg.role === 'user' && txtA === txtB) {
+            console.log("   ✂️ Deduplicating: Removed last history message (Match with incoming).");
             history.pop();
         }
     }
@@ -107,18 +111,15 @@ async function processSmartFieldReply(leadId, incomingText) {
         await handleOrderCreation(leadId, toolArgs, token);
         
         // Confirmation Message
-        const confirmationText = `¡Listo ${toolArgs.nombre}! 🎉\n\nTu orden ha sido registrada exitosamente. Vamos a procesar tu envío a la dirección: ${toolArgs.direccion}, ${toolArgs.ciudad}.\n\nSi tienes preguntas adicionales, un asesor humano revisará este chat pronto. ¡Gracias por confiar en Copacol!`;
+        const confirmationText = `¡Listo ${toolArgs.nombre}! 🎉\n\nTu orden ha sido registrada exitosamente. Vamos a procesar tu envío a la dirección: ${toolArgs.direccion}, ${toolArgs.ciudad}.\n\nSi tienes preguntas adicionales, un asesor humano revisará este chat pronto. ¡Gracias por confiar en Copacol! 🙏🏽`;
         
         await updateAiResponseField(leadId, confirmationText, token);
-
-        // Send the confirmation immediately
         await triggerSalesbotLoop(leadId, leadData.status_id, token);
 
         // MOVE TO MASTERSHOP
         if (ID_PIPELINE_MASTERSHOP !== 0 && ID_STATUS_INICIAL_MASTERSHOP !== 0) {
             console.log(`🚚 MOVING TO MASTERSHOP PIPELINE...`);
             try {
-                // Wait 4 seconds to let the message send before moving
                 await sleep(4000); 
                 await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
                     pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
@@ -140,7 +141,7 @@ async function processSmartFieldReply(leadId, incomingText) {
     }
 }
 
-// Helper to Trigger Kommo Salesbot (Status toggle)
+// Helper to Trigger Kommo Salesbot
 async function triggerSalesbotLoop(leadId, currentStatus, token) {
     const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
     const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
@@ -162,47 +163,83 @@ async function triggerSalesbotLoop(leadId, currentStatus, token) {
 }
 
 // ---------------------------------------------------------
-// 🧠 HELPER: CONTEXT RETRIEVAL (WIDE NET VERSION)
+// 🧠 HELPER: UNIVERSAL CONTEXT RETRIEVAL (ROBUST)
 // ---------------------------------------------------------
 async function getConversationHistory(leadId, token) {
     try {
+        // We do NOT filter by type inside the URL to ensure we get EVERYTHING.
         const url = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=50`;
+        
         const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
 
-        if (!res.data || !res.data._embedded || !res.data._embedded.events) return [];
+        if (!res.data || !res.data._embedded || !res.data._embedded.events) {
+            return [];
+        }
 
         const events = res.data._embedded.events;
         const messages = [];
 
-        // Reverse to get Chronological order
+        // Reverse for chronological order (Oldest -> Newest)
         for (const ev of events.reverse()) {
+            
+            // 🔍 DEBUG: Uncomment if you still get 0 messages to see raw event types
+            // console.log(`🔍 EVENT: ${ev.type}`, JSON.stringify(ev.value || ev.data));
+
             let role = '';
             let content = '';
 
-            // User Msgs
-            if (ev.type === 'incoming_chat_message' || ev.type === 'chat_message' || ev.type === 'incoming_sms') {
+            // --- 1. DETECT ROLE ---
+            if (['incoming_chat_message', 'incoming_sms', 'chat_message'].includes(ev.type)) {
                 role = 'user';
-                content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
             } 
-            // Bot Msgs
-            else if (ev.type === 'outgoing_chat_message' || ev.type === 'outgoing_sms') {
+            else if (['outgoing_chat_message', 'outgoing_sms'].includes(ev.type)) {
                 role = 'assistant';
-                content = ev.value_after && ev.value_after[0] ? ev.value_after[0].note.text : ev.data?.text;
+            }
+            // Sometimes custom field updates contain the previous answer
+            else if (ev.type === 'custom_field_value_changed') {
+                 // You can optionally treat specific field updates as bot messages if needed,
+                 // but usually outgoing_chat_message covers it.
+                 continue; 
             }
 
-            // Cleanup
-            if (!content && typeof ev.value === 'string') content = ev.value;
+            if (!role) continue; // Skip irrelevant events (like status changes)
 
-            if (role && content && typeof content === 'string') {
-                 content = content.replace(/<[^>]*>?/gm, '').trim();
-                 // Filter System/Noise
-                 if (content.length > 1 && !content.includes("updated the stage")) {
-                     messages.push({ role, content });
-                 }
+            // --- 2. EXTRACT CONTENT (The Universal Extractor) ---
+            
+            // Path A: Standard Note Structure (value_after -> note -> text)
+            if (ev.value_after && ev.value_after[0] && ev.value_after[0].note && ev.value_after[0].note.text) {
+                content = ev.value_after[0].note.text;
+            }
+            // Path B: Direct Data Text
+            else if (ev.data && ev.data.text) {
+                content = ev.data.text;
+            }
+            // Path C: Simple Value
+            else if (typeof ev.value === 'string') {
+                content = ev.value;
+            }
+            // Path D: Note object direct
+            else if (ev.note && ev.note.text) {
+                content = ev.note.text;
+            }
+
+            // --- 3. CLEAN & ADD ---
+            if (content && typeof content === 'string') {
+                // Remove HTML tags
+                content = content.replace(/<[^>]*>?/gm, '').trim();
+
+                // Filters
+                if (content.length < 2) continue; // Noise
+                if (content.includes("updated the stage")) continue;
+                if (content.includes("bot started")) continue; 
+                
+                messages.push({ role, content });
             }
         }
+        
         console.log(`   ✅ History Loaded: ${messages.length} messages.`);
         return messages;
+
     } catch (err) {
         console.error("⚠️ History fetch warning:", err.message);
         return []; 
@@ -215,7 +252,7 @@ async function getConversationHistory(leadId, token) {
 
 async function updateAiResponseField(leadId, text, token) {
     try {
-        const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA); // Make sure this is 2100125 in ENV
+        const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA); 
         if (!fieldId) return;
 
         await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
@@ -247,13 +284,11 @@ async function handleOrderCreation(leadId, args, token) {
             { field_id: FIELDS.VALOR_TOTAL, values: [{ value: totalValue }] }
         ];
 
-        // Save fields
         await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
             price: totalValue, 
             custom_fields_values: customFields
         }, { headers: { Authorization: `Bearer ${token}` } });
         
-        // Link Catalog Item
         try {
             await axios.post(`https://${API_DOMAIN}/api/v4/leads/${leadId}/link`, [
                 {

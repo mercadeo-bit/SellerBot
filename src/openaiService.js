@@ -34,43 +34,51 @@ try {
     console.error("⚠️ Error leyendo products.json:", err.message);
 }
 
-// 3. SYSTEM PROMPT RE-ENGINEERED 🧠
+// 3. SYSTEM PROMPT (ESTILO FAVER IMPLEMENTED 🦁)
 const SYSTEM_PROMPT = `
-ACTÚA COMO: Sofía, Asesora Digital de COPACOL.
-ESTILO: "Estilo Faver" (Amable, concreto, aliado comercial).
+ACTÚA COMO: Sofía, Asesora Digital de COPACOL (Estilo Faver).
+OBJETIVO: Ser una aliada comercial, no solo una vendedora.
 
-=== PROTOCOLO DE MEMORIA Y SALUDO ===
-1. Revisa el historial de la conversación.
-2. **SI YA SALUDASTE AL INICIO:** NO vuelvas a decir "Hola", "Mucho gusto", ni te presentes de nuevo. Continúa la charla fluidamente.
+=== MANUAL DE COMUNICACIÓN (ESTILO FAVER) ===
+1. **Calidez y Respeto:** Siempre agradece y usa un tono positivo.
+2. **Aliados:** Usa frases como "Estamos para apoyarte", "Somos tus aliados en este proyecto".
+3. **Emojis:** Úsalos con moderación (Máximo 2 por mensaje). Preferidos: 🙏🏽, 👌🏽, 💪🏽, 🤝, 🙂.
+4. **Transparencia:** Si no hay stock, dilo con honestidad y ofrece alternativas.
+5. **Cierre Suave:** "Quedo atento", "¿Te parece bien esta opción?".
 
-=== FLUJO DE VENTA (IMPORTANTE) ===
-DETECTA LA INTENCIÓN DEL CLIENTE:
+=== REGLA DE ORO DE MEMORIA ===
+Revisa el historial ("user" messages).
+**SI YA SE HAN SALUDADO:** ¡PROHIBIDO volver a decir "Hola" o presentarte! Ve directo al grano.
+Si es el PRIMER mensaje: "¡Hola! Mi nombre es Sofía, es un gusto saludarte. 👋"
 
-**CASO A: CLIENTE PREGUNTA DETALLES (Fase Venta)**
-- Responde dudas sobre el producto (Soldador Inversor).
-- Menciona beneficios clave y precio.
+=== FASES DE LA CONVERSACIÓN ===
 
-**CASO B: CLIENTE QUIERE COMPRAR (Fase Cierre)**
-- Si el cliente dice "Lo quiero", "Comprar", "Me interesa", "Listo":
-- **DETÉN LA VENTA INMEDIATAMENTE.**
-- Pasa a modo: **RECOLECCIÓN DE DATOS**.
-- Tu respuesta debe ser: "¡Excelente decisión! Para generar tu orden de envío hoy mismo, confírmame por favor: Nombre completo, Cédula, Ciudad y Dirección."
+**FASE 1: ASESORÍA (El cliente pregunta)**
+- Responde usando el INVENTARIO.
+- Destaca beneficios técnicos.
+- Termina cada respuesta con una pregunta para avanzar (¿Qué cantidad necesitas? ¿Para qué ciudad sería?).
 
-=== REQUISITOS PARA LA ORDEN (OBLIGATORIOS) ===
-No llames a la función 'finalizar_compra_mastershop' hasta tener TODOS estos datos. Pídelos si faltan.
-- Nombre y Apellido.
-- Cédula / NIT (Solo números).
-- Teléfono.
-- Departamento (Ej: Valle).
-- Ciudad.
-- Dirección exacta (Barrio, nomenclatura).
+**FASE 2: TOMA DE PEDIDO (El cliente decide comprar)**
+Si el cliente dice "Lo quiero", "Comprar", "Mándamelo":
+1. **Deja de vender.**
+2. **Pide los datos.** Tu respuesta debe ser similar a:
+   "¡Excelente decisión! 🙏🏽 Para generar tu orden y coordinar el despacho, por favor confírmame los siguientes datos para la factura:"
+
+**FASE 3: DATOS OBLIGATORIOS (Checklist)**
+No llames a la función 'finalizar_compra_mastershop' hasta tener TODOS estos datos. Pídelos en bloque o uno por uno, pero asegúrate de tenerlos:
+- [ ] Nombre y Apellido
+- [ ] Cédula / NIT
+- [ ] Celular
+- [ ] Correo Electrónico (Email)
+- [ ] Departamento y Ciudad
+- [ ] Dirección Exacta (Barrio/Nomenclatura)
 
 === INVENTARIO ===
 ${productCatalogString}
 
-⚠️ REGLA DE FORMATO:
-- Respuestas cortas (Máximo 300 caracteres).
-- NO uses markdown complejo (solo negritas leves si es necesario).
+REGLAS TÉCNICAS:
+- Respuesta Máxima: 300 Caracteres (WhatsApp).
+- NO inventes productos fuera del inventario.
 `;
 
 const tools = [
@@ -78,22 +86,22 @@ const tools = [
         type: "function",
         function: {
             name: "finalizar_compra_mastershop",
-            description: "Ejecutar ÚNICAMENTE cuando el cliente haya entregado TODOS los datos de envío y facturación.",
+            description: "Ejecutar ESTRICTAMENTE cuando tengas TODOS los 6 datos obligatorios (Nombre, Cedula, Celular, Email, Ubicacion, Direccion).",
             parameters: {
                 type: "object",
                 properties: {
                     nombre: { type: "string", description: "Primer nombre del cliente" },
                     apellido: { type: "string", description: "Apellidos del cliente" },
-                    cedula: { type: "string", description: "Número de documento de identidad" },
+                    cedula: { type: "string", description: "Número de documento de identidad o NIT" },
                     telefono: { type: "string", description: "Número de celular/whatsapp" },
-                    email: { type: "string", description: "Correo electrónico (si no tiene, usar: noaplica@copacol.com)" },
-                    departamento: { type: "string", description: "Nombre completo del departamento (ej: Valle del Cauca)" },
-                    ciudad: { type: "string", description: "Nombre de la ciudad o municipio" },
-                    direccion: { type: "string", description: "Dirección física exacta con barrio" },
-                    info_adicional: { type: "string", description: "Referencias de llegada" },
-                    cantidad_productos: { type: "number", description: "Cantidad de unidades (por defecto 1)" }
+                    email: { type: "string", description: "Correo electrónico" },
+                    departamento: { type: "string", description: "Departamento (ej: Valle, Antioquia)" },
+                    ciudad: { type: "string", description: "Ciudad o Municipio" },
+                    direccion: { type: "string", description: "Dirección física con barrio" },
+                    info_adicional: { type: "string", description: "Puntos de referencia" },
+                    cantidad_productos: { type: "number", description: "Cantidad de unidades" }
                 },
-                required: ["nombre", "apellido", "cedula", "telefono", "departamento", "ciudad", "direccion"]
+                required: ["nombre", "apellido", "cedula", "telefono", "email", "departamento", "ciudad", "direccion"]
             }
         }
     }
@@ -109,9 +117,8 @@ function sanitizeMessages(messages) {
 
 export async function analizarMensaje(contexto, mensajeUsuario) {
     try {
-        if (!mensajeUsuario || mensajeUsuario.trim() === "") return { content: "Sigo aquí." };
-        
         const historyClean = sanitizeMessages(contexto);
+        
         console.log(`🧠 AI Context: Analyzing ${historyClean.length} previous msgs.`);
 
         const response = await openai.chat.completions.create({
@@ -119,17 +126,18 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
             messages: [
                 { role: "system", content: SYSTEM_PROMPT },
                 ...historyClean,
-                { role: "user", content: mensajeUsuario }
+                // Si hay mensaje nuevo, lo agregamos. Si no, OpenAI analiza solo el historial.
+                ...(mensajeUsuario ? [{ role: "user", content: mensajeUsuario }] : [])
             ],
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.1, // Very low temp to be strict with data collection
-            max_tokens: 350
+            temperature: 0.2, 
+            max_tokens: 400
         });
 
         return response.choices[0].message;
     } catch (error) {
         console.error("❌ OpenAI API Error:", error.message);
-        return { content: "Estamos experimentando alta demanda. ¿Me confirmas tu consulta?" };
+        return { content: "Dame un segundo, estoy validando la información con bodega. 🙏🏽" };
     }
 }
