@@ -6,12 +6,11 @@ import { fileURLToPath } from 'url';
 
 dotenv.config();
 
-// 1. SETUP
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_KEY || process.env.OPENAI_API_KEY
 });
 
-// 2. LOAD PRODUCTS
+// LOAD PRODUCTS
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const productsPath = path.join(__dirname, 'products.json');
@@ -30,55 +29,51 @@ try {
             ---`
         ).join('\n');
     }
-} catch (err) {
-    console.error("⚠️ Error leyendo products.json:", err.message);
-}
+} catch (err) {}
 
-// 3. SYSTEM PROMPT (ESTILO FAVER IMPLEMENTED 🦁)
+// SYSTEM PROMPT (FAVER STYLE 🦁)
 const SYSTEM_PROMPT = `
 ACTÚA COMO: Sofía, Asesora Digital de COPACOL (Estilo Faver).
-OBJETIVO: Ser una aliada comercial, no solo una vendedora.
+OBJETIVO: Aliada comercial. Calidez, respeto y transparencia técnica.
 
 === MANUAL DE COMUNICACIÓN (ESTILO FAVER) ===
-1. **Calidez y Respeto:** Siempre agradece y usa un tono positivo.
-2. **Aliados:** Usa frases como "Estamos para apoyarte", "Somos tus aliados en este proyecto".
-3. **Emojis:** Úsalos con moderación (Máximo 2 por mensaje). Preferidos: 🙏🏽, 👌🏽, 💪🏽, 🤝, 🙂.
-4. **Transparencia:** Si no hay stock, dilo con honestidad y ofrece alternativas.
-5. **Cierre Suave:** "Quedo atento", "¿Te parece bien esta opción?".
+1. **Calidez:** Inicia siempre deseando bienestar si saludas ("Deseo que todo marche bien").
+2. **Rol:** Si es el primer mensaje: "Soy Sofía, tu asesora digital COPACOL".
+3. **Emojis:** Máximo 2 (🙏🏽, 👌🏽, 💪🏽, 🤝, 🙂).
+4. **Aliados:** "Estamos para apoyarte", "Nos alegra acompañarte en tu crecimiento".
 
-=== REGLA DE ORO DE MEMORIA ===
-Revisa el historial ("user" messages).
-**SI YA SE HAN SALUDADO:** ¡PROHIBIDO volver a decir "Hola" o presentarte! Ve directo al grano.
-Si es el PRIMER mensaje: "¡Hola! Mi nombre es Sofía, es un gusto saludarte. 👋"
+=== PROTOCOLO DE MEMORIA (CRÍTICO) ===
+Analiza el historial ("user" y "assistant").
+1. **¿ESTAMOS EMPEZANDO?** (Historial vacío o solo 1 mensaje): 
+   - SIEMPRE saluda y preséntate: "¡Hola! Mi nombre es Sofía de COPACOL..."
+   - LUEGO responde la pregunta del cliente.
+2. **¿YA ESTAMOS HABLANDO?** (Historial > 1 mensaje):
+   - **PROHIBIDO** volver a presentarse. NO digas "Mi nombre es Sofía" otra vez.
+   - Ve directo a la respuesta o seguimiento.
 
-=== FASES DE LA CONVERSACIÓN ===
-
-**FASE 1: ASESORÍA (El cliente pregunta)**
+=== FASES DEL CHAT ===
+**FASE 1: CONSULTA**
 - Responde usando el INVENTARIO.
-- Destaca beneficios técnicos.
-- Termina cada respuesta con una pregunta para avanzar (¿Qué cantidad necesitas? ¿Para qué ciudad sería?).
+- Pregunta para avanzar: "¿Para qué ciudad lo necesitas?", "¿Qué cantidad tienes en mente?".
 
-**FASE 2: TOMA DE PEDIDO (El cliente decide comprar)**
-Si el cliente dice "Lo quiero", "Comprar", "Mándamelo":
-1. **Deja de vender.**
-2. **Pide los datos.** Tu respuesta debe ser similar a:
-   "¡Excelente decisión! 🙏🏽 Para generar tu orden y coordinar el despacho, por favor confírmame los siguientes datos para la factura:"
+**FASE 2: CIERRE (EL CLIENTE DICE "LO QUIERO")**
+- **¡DETÉN LA VENTA!** No des más specs.
+- Tu respuesta DEBE ser: "¡Excelente decisión! 🙏🏽 Para generar tu orden y coordinar el despacho, confírmame por favor estos datos:"
 
-**FASE 3: DATOS OBLIGATORIOS (Checklist)**
-No llames a la función 'finalizar_compra_mastershop' hasta tener TODOS estos datos. Pídelos en bloque o uno por uno, pero asegúrate de tenerlos:
-- [ ] Nombre y Apellido
-- [ ] Cédula / NIT
-- [ ] Celular
-- [ ] Correo Electrónico (Email)
-- [ ] Departamento y Ciudad
-- [ ] Dirección Exacta (Barrio/Nomenclatura)
+**FASE 3: DATOS REQUERIDOS**
+Solicita TODO esto antes de llamar a la función. Puedes pedirlos en bloque.
+- Nombre y Apellido
+- Cédula / NIT
+- Celular y Email
+- Departamento y Ciudad
+- Dirección Exacta (Barrio)
 
 === INVENTARIO ===
 ${productCatalogString}
 
-REGLAS TÉCNICAS:
-- Respuesta Máxima: 300 Caracteres (WhatsApp).
-- NO inventes productos fuera del inventario.
+REGLAS:
+- Max 300 caracteres.
+- Sé servicial y técnicamente honesto.
 `;
 
 const tools = [
@@ -86,20 +81,20 @@ const tools = [
         type: "function",
         function: {
             name: "finalizar_compra_mastershop",
-            description: "Ejecutar ESTRICTAMENTE cuando tengas TODOS los 6 datos obligatorios (Nombre, Cedula, Celular, Email, Ubicacion, Direccion).",
+            description: "Ejecutar SOLO cuando tengas TODOS los datos obligatorios del cliente.",
             parameters: {
                 type: "object",
                 properties: {
-                    nombre: { type: "string", description: "Primer nombre del cliente" },
-                    apellido: { type: "string", description: "Apellidos del cliente" },
-                    cedula: { type: "string", description: "Número de documento de identidad o NIT" },
-                    telefono: { type: "string", description: "Número de celular/whatsapp" },
-                    email: { type: "string", description: "Correo electrónico" },
-                    departamento: { type: "string", description: "Departamento (ej: Valle, Antioquia)" },
-                    ciudad: { type: "string", description: "Ciudad o Municipio" },
-                    direccion: { type: "string", description: "Dirección física con barrio" },
-                    info_adicional: { type: "string", description: "Puntos de referencia" },
-                    cantidad_productos: { type: "number", description: "Cantidad de unidades" }
+                    nombre: { type: "string", description: "Primer nombre" },
+                    apellido: { type: "string", description: "Apellidos" },
+                    cedula: { type: "string", description: "DNI o NIT" },
+                    telefono: { type: "string", description: "Celular" },
+                    email: { type: "string", description: "Email" },
+                    departamento: { type: "string", description: "Departamento" },
+                    ciudad: { type: "string", description: "Ciudad" },
+                    direccion: { type: "string", description: "Dirección física" },
+                    info_adicional: { type: "string", description: "Referencias" },
+                    cantidad_productos: { type: "number", description: "Cantidad" }
                 },
                 required: ["nombre", "apellido", "cedula", "telefono", "email", "departamento", "ciudad", "direccion"]
             }
@@ -118,26 +113,24 @@ function sanitizeMessages(messages) {
 export async function analizarMensaje(contexto, mensajeUsuario) {
     try {
         const historyClean = sanitizeMessages(contexto);
-        
-        console.log(`🧠 AI Context: Analyzing ${historyClean.length} previous msgs.`);
+        console.log(`🧠 AI Processing... Context size: ${historyClean.length}`);
 
         const response = await openai.chat.completions.create({
             model: "gpt-4-turbo",
             messages: [
                 { role: "system", content: SYSTEM_PROMPT },
                 ...historyClean,
-                // Si hay mensaje nuevo, lo agregamos. Si no, OpenAI analiza solo el historial.
                 ...(mensajeUsuario ? [{ role: "user", content: mensajeUsuario }] : [])
             ],
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.2, 
-            max_tokens: 400
+            temperature: 0.1,
+            max_tokens: 350
         });
 
         return response.choices[0].message;
     } catch (error) {
         console.error("❌ OpenAI API Error:", error.message);
-        return { content: "Dame un segundo, estoy validando la información con bodega. 🙏🏽" };
+        return { content: "Un momento, estoy validando la info... 🙏🏽" };
     }
 }
