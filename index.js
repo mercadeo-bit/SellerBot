@@ -10,167 +10,282 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const API_DOMAIN = process.env.KOMMO_SUBDOMAIN + '.amocrm.com';
-const ID_PIPELINE_MASTERSHOP = 12549896; 
-const ID_STATUS_INICIAL_MASTERSHOP = 96929184;
+
+// ----------------------------------------------------
+// ⚙️ CONFIGURATION
+// ----------------------------------------------------
+const PRODUCT_ID = 1755995; 
+const PRODUCT_PRICE = 319900; 
+
+// Mastershop Pipelines
+const ID_PIPELINE_MASTERSHOP = 12631352; 
+const ID_STATUS_INICIAL_MASTERSHOP = 97525680;
 
 // Lead Fields Map
 const FIELDS = {
-    NOMBRE: 2099831, 
-    APELLIDO: 2099833, 
-    CORREO: 2099835, 
-    TELEFONO: 2099837, 
-    DEPARTAMENTO: 2099839, 
-    CIUDAD: 2099841, 
-    DIRECCION: 2099843, 
-    INFO_ADICIONAL: 2099845, 
+    NOMBRE: 2099831,
+    APELLIDO: 2099833,
+    CORREO: 2099835,
+    TELEFONO: 2099837,
+    DEPARTAMENTO: 2099839,
+    CIUDAD: 2099841,
+    DIRECCION: 2099843,
+    INFO_ADICIONAL: 2099845,
     FORMA_PAGO: 2099849, 
-    VALOR_TOTAL: 2099863, 
+    VALOR_TOTAL: 2099863,
     CEDULA: 2099635
 };
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI: DETECTIVE MODE 🕵️ UP'));
+app.get('/', (req, res) => res.send('Copacol AI: CONTACT HISTORY FIX 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
+
     try {
         const body = req.body;
+        
         if (body.message && body.message.add) {
             const msg = body.message.add[0];
             if (msg.type === 'incoming') {
                 console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}`);
-                processSmartFieldReply(msg.entity_id, msg.text).catch(err => console.error(err));
+                processSmartFieldReply(msg.entity_id, msg.text).catch(err => 
+                    console.error("❌ Async Process Error:", err.message)
+                );
             }
         }
-    } catch (err) { console.error(err); }
+    } catch (err) {
+        console.error('❌ Webhook Error:', err.message);
+    }
 });
 
 async function processSmartFieldReply(leadId, incomingText) {
     const token = await getAccessToken();
 
-    // 1. OBTENER DATOS (AUDITORIA)
-    const leadRes = await axios.get(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { headers: { Authorization: `Bearer ${token}` } });
+    // 1. OBTENER INFORMACIÓN DEL LEAD (INCLUYENDO CONTACTOS)
+    // Agregamos ?with=contacts para obtener el ID de la persona
+    const leadRes = await axios.get(`https://${API_DOMAIN}/api/v4/leads/${leadId}?with=contacts`, { 
+        headers: { Authorization: `Bearer ${token}` } 
+    });
     const leadData = leadRes.data;
     
-    // SECURITY CHECK
-    const REQUIRED = String(process.env.PIPELINE_ID_VENTAS).trim(); 
-    if (String(leadData.pipeline_id) !== REQUIRED) { console.log("⛔ Pipeline Mismatch"); return; }
+    // 🛡️ SECURITY AUDIT
+    const REQUIRED_PIPELINE = String(process.env.PIPELINE_ID_VENTAS).trim(); 
+    const CURRENT_PIPELINE = String(leadData.pipeline_id || 0);
 
-    // 2. DIAGNOSTICO DE HISTORIAL (AQUI ESTA LA CLAVE)
-    console.log(`🕵️ DIAGNOSING HISTORY for Lead ${leadId}...`);
-    const history = await getConversationHistory_DIAGNOSTIC(leadId, token);
+    if (CURRENT_PIPELINE !== REQUIRED_PIPELINE) {
+        console.log(`⛔ SKIP: Pipeline ${CURRENT_PIPELINE} (Expected: ${REQUIRED_PIPELINE})`);
+        return; 
+    }
+    console.log(`✅ ACCESS GRANTED. Finding Contact...`);
+
+    // 2. DETECTAR ID DEL CONTACTO
+    let contactId = null;
+    if (leadData._embedded && leadData._embedded.contacts && leadData._embedded.contacts.length > 0) {
+        contactId = leadData._embedded.contacts[0].id;
+        console.log(`👤 Connected Contact ID: ${contactId}`);
+    } else {
+        console.log("⚠️ No Contact linked to Lead. History might be empty.");
+    }
+
+    // 3. RECUPERAR CONTEXTO (DEL CONTACTO, NO DEL LEAD)
+    console.log(`📜 Fetching conversation history...`);
+    // Pass the contactId to the history fetcher
+    const history = await getConversationHistory(leadId, contactId, token);
 
     // DEDUPLICAR
     if (history.length > 0) {
         const lastMsg = history[history.length - 1];
-        if (lastMsg.role === 'user' && String(lastMsg.content).includes(String(incomingText))) {
-            console.log("   ✂️ Deduplicating match.");
+        const txtA = String(lastMsg.content || "").trim().toLowerCase();
+        const txtB = String(incomingText || "").trim().toLowerCase();
+        
+        // Comparación simple para evitar bucles inmediatos
+        if (lastMsg.role === 'user' && (txtA.includes(txtB) || txtB.includes(txtA))) {
+            console.log("   ✂️ Deduplicating: Removed last history message.");
             history.pop();
         }
     }
 
-    // 3. IA
+    // 4. GENERACIÓN IA
     const aiResponse = await analizarMensaje(history, incomingText);
 
-    // 4. EJECUCION
+    // 5. EJECUCIÓN
     if (aiResponse.tool_calls) {
-        console.log("🛠️ AI Action Triggered");
-        const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
-        // Save order logic stripped for brevity in debug mode, but functionality remains
-        const confText = `¡Listo ${args.nombre}! Orden registrada.`;
-        await updateAiResponseField(leadId, confText, token);
+        // --- MODO ACCIÓN ---
+        console.log("🛠️ AI Action: Finalizar Compra");
+        const toolArgs = JSON.parse(aiResponse.tool_calls[0].function.arguments);
+        await handleOrderCreation(leadId, toolArgs, token);
+        
+        const confirmationText = `¡Listo ${toolArgs.nombre}! 🎉\n\nTu orden ha sido registrada exitosamente. Vamos a procesar tu envío a la dirección: ${toolArgs.direccion}, ${toolArgs.ciudad}.\n\nSi tienes preguntas adicionales, un asesor humano revisará este chat pronto. ¡Gracias por confiar en Copacol! 🙏🏽`;
+        
+        await updateAiResponseField(leadId, confirmationText, token);
+        await triggerSalesbotLoop(leadId, leadData.status_id, token);
+
+        // MOVE TO MASTERSHOP
+        if (ID_PIPELINE_MASTERSHOP !== 0 && ID_STATUS_INICIAL_MASTERSHOP !== 0) {
+            console.log(`🚚 MOVING TO MASTERSHOP...`);
+            try {
+                await sleep(4000); 
+                await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+                    pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
+                    status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
+                }, { headers: { Authorization: `Bearer ${token}` } });
+                console.log("✅ Lead Moved Successfully.");
+            } catch (e) { console.error("⚠️ Move Error:", e.message); }
+        }
+
     } else {
-        const finalText = aiResponse.content.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
+        // --- MODO CHAT ---
+        let finalText = aiResponse.content || "...";
+        finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
+        
         await updateAiResponseField(leadId, finalText, token);
+        await triggerSalesbotLoop(leadId, leadData.status_id, token);
     }
-    
-    // SALESBOT TRIGGER
-    await triggerSalesbotLoop(leadId, leadData.status_id, token);
 }
 
-// ==========================================
-// 🕵️ EL DETECTIVE (IMPRIME TODO LO QUE VE)
-// ==========================================
-async function getConversationHistory_DIAGNOSTIC(leadId, token) {
+// ---------------------------------------------------------
+// 🧠 HELPER: CONTACT-BASED HISTORY RETRIEVAL
+// ---------------------------------------------------------
+async function getConversationHistory(leadId, contactId, token) {
     let allMessages = [];
 
-    // 1. REVISAR EVENTOS (Timeline Standard)
-    try {
-        const eventsUrl = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=5`;
-        const evRes = await axios.get(eventsUrl, { headers: { Authorization: `Bearer ${token}` } });
-        
-        // 🔴 IMPRIMIR LA RESPUESTA CRUDA PARA QUE ME LA ENVIES
-        if (evRes.data?._embedded?.events) {
-            console.log("\n📦 === RAW EVENTS DUMP (COPY THIS) ===");
-            console.log(JSON.stringify(evRes.data._embedded.events.slice(0, 2), null, 2)); // Solo los ultimos 2 para no llenar el log
-            console.log("========================================\n");
+    // Si tenemos un contacto, buscamos su historial (Aquí está el Chat de WhatsApp)
+    if (contactId) {
+        try {
+            // Buscamos eventos en la entidad 'contact' en vez de 'lead'
+            const eventsUrl = `https://${API_DOMAIN}/api/v4/events?filter[entity]=contact&filter[entity_id]=${contactId}&limit=50`;
+            const evRes = await axios.get(eventsUrl, { headers: { Authorization: `Bearer ${token}` } });
             
-            // Logica temporal de parsing
-            const events = evRes.data._embedded.events.reverse();
-            for (const ev of events) {
-                // Intento estandar de leer
-                let content = ev.value_after?.[0]?.note?.text || ev.data?.text || ev.value;
-                if(content && typeof content === 'string') allMessages.push({ role: 'user', content }); 
-            }
-        } else {
-            console.log("⚠️ NO EVENTS FOUND.");
-        }
-    } catch (e) { console.error("Event Fetch Error", e.message); }
+            if (evRes.data?._embedded?.events) {
+                const events = evRes.data._embedded.events.reverse();
+                for (const ev of events) {
+                    let role = '';
+                    let content = '';
 
-    // 2. REVISAR NOTAS (Donde se esconden los QR widgets)
-    try {
-        const notesUrl = `https://${API_DOMAIN}/api/v4/leads/${leadId}/notes?limit=5`;
-        const notesRes = await axios.get(notesUrl, { headers: { Authorization: `Bearer ${token}` } });
-        
-        // 🔴 IMPRIMIR LA RESPUESTA CRUDA PARA QUE ME LA ENVIES
-        if (notesRes.data?._embedded?.notes) {
-            console.log("\n📒 === RAW NOTES DUMP (COPY THIS) ===");
-            console.log(JSON.stringify(notesRes.data._embedded.notes.slice(0, 2), null, 2)); 
-            console.log("=======================================\n");
+                    // Detect Roles
+                    if (['incoming_chat_message', 'incoming_sms', 'chat_message'].includes(ev.type)) role = 'user';
+                    else if (['outgoing_chat_message', 'outgoing_sms'].includes(ev.type)) role = 'assistant';
 
-            const notes = notesRes.data._embedded.notes.reverse();
-            for (const n of notes) {
-                // INTENTO DE LEER TODO
-                let content = n.text || n.params?.text || n.params?.content;
-                
-                if (content) {
-                    // Limpieza basica
-                    content = String(content).replace(/<[^>]*>?/gm, '');
-                    // Asumir que todo es usuario por ahora para probar lectura
-                    if (content.length > 2) allMessages.push({ role: 'user', content: content });
+                    // Extract Text (Universal methods)
+                    if (ev.value_after && ev.value_after[0]?.note?.text) content = ev.value_after[0].note.text;
+                    else if (ev.value_after && ev.value_after[0]?.message?.text) content = ev.value_after[0].message.text; // WhatsApp often here
+                    else if (ev.data?.text) content = ev.data.text;
+                    
+                    if (role && content) {
+                         content = content.replace(/<[^>]*>?/gm, '').trim();
+                         // Evitar mensajes del sistema
+                         if (content.length > 1 && !content.includes("updated the stage")) {
+                             allMessages.push({ role, content });
+                         }
+                    }
                 }
             }
-        } else {
-            console.log("⚠️ NO NOTES FOUND.");
-        }
-    } catch (e) { console.error("Note Fetch Error", e.message); }
+        } catch (e) { console.error("⚠️ Contact History Error:", e.message); }
+    }
 
-    console.log(`✅ FINAL COUNT: ${allMessages.length} potential messages found.`);
+    // FALLBACK: Si no hay historial en contacto (raro), miramos el Lead
+    if (allMessages.length === 0) {
+        try {
+            console.log("   ⚠️ Empty Contact history. Checking Lead history as fallback...");
+            const leadEventsUrl = `https://${API_DOMAIN}/api/v4/events?filter[entity]=lead&filter[entity_id]=${leadId}&limit=50`;
+            const res = await axios.get(leadEventsUrl, { headers: { Authorization: `Bearer ${token}` } });
+
+            if (res.data?._embedded?.events) {
+                const events = res.data._embedded.events.reverse();
+                for (const ev of events) {
+                    let role = ''; 
+                    let content = '';
+                    
+                    if (['incoming_chat_message'].includes(ev.type)) role = 'user';
+                    else if (['outgoing_chat_message'].includes(ev.type)) role = 'assistant';
+
+                    if (ev.value_after && ev.value_after[0]?.note?.text) content = ev.value_after[0].note.text;
+                    
+                    if (role && content) allMessages.push({ role, content: content.replace(/<[^>]*>?/gm, '') });
+                }
+            }
+        } catch(e) {}
+    }
+
+    console.log(`   ✅ History Loaded: ${allMessages.length} messages found (via Contact/Lead).`);
     return allMessages;
 }
 
-// Helpers minimos para que funcione
+// ---------------------------------------------------------
+// 🛠️ UTILS
+// ---------------------------------------------------------
+
 async function updateAiResponseField(leadId, text, token) {
     try {
+        const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA); 
+        if (!fieldId) return;
+
         await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
-            custom_fields_values: [{ field_id: parseInt(process.env.FIELD_ID_RESPUESTA_IA), values: [{ value: text }] }]
+            custom_fields_values: [
+                { field_id: fieldId, values: [{ value: text }] }
+            ]
         }, { headers: { Authorization: `Bearer ${token}` } });
-    } catch(e) {}
+        console.log(`📝 Field Updated.`);
+    } catch(e) { console.error("❌ Field Update Failed:", e.message); }
 }
 
 async function triggerSalesbotLoop(leadId, currentStatus, token) {
     const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
     const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
+
     if (currentStatus == stageCualificando) {
-        await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { status_id: stageEntrada }, { headers: { Authorization: `Bearer ${token}` } });
-        await sleep(1000);
+        console.log("🔙 Stepping back...");
+        await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
+            { status_id: stageEntrada }, { headers: { Authorization: `Bearer ${token}` } });
+        await sleep(1500); 
     }
-    await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { status_id: stageCualificando }, { headers: { Authorization: `Bearer ${token}` } });
+    console.log("🔫 Firing Salesbot...");
+    await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, 
+        { status_id: stageCualificando }, { headers: { Authorization: `Bearer ${token}` } });
+}
+
+async function handleOrderCreation(leadId, args, token) {
+    try {
+        console.log("📝 Saving Order Data...");
+        const quantity = args.cantidad_productos || 1;
+        const totalValue = quantity * PRODUCT_PRICE;
+
+        const customFields = [
+            { field_id: FIELDS.NOMBRE, values: [{ value: args.nombre }] },
+            { field_id: FIELDS.APELLIDO, values: [{ value: args.apellido }] },
+            { field_id: FIELDS.CEDULA, values: [{ value: args.cedula }] },
+            { field_id: FIELDS.TELEFONO, values: [{ value: args.telefono }] },
+            { field_id: FIELDS.CORREO, values: [{ value: args.email || "noaplica@copacol.com" }] },
+            { field_id: FIELDS.DEPARTAMENTO, values: [{ value: args.departamento }] },
+            { field_id: FIELDS.CIUDAD, values: [{ value: args.ciudad }] },
+            { field_id: FIELDS.DIRECCION, values: [{ value: args.direccion }] },
+            { field_id: FIELDS.INFO_ADICIONAL, values: [{ value: args.info_adicional || "-" }] },
+            { field_id: FIELDS.FORMA_PAGO, values: [{ value: "Pago Contra Entrega (Con recaudo)" }] },
+            { field_id: FIELDS.VALOR_TOTAL, values: [{ value: totalValue }] }
+        ];
+
+        await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+            price: totalValue, 
+            custom_fields_values: customFields
+        }, { headers: { Authorization: `Bearer ${token}` } });
+        
+        try {
+            await axios.post(`https://${API_DOMAIN}/api/v4/leads/${leadId}/link`, [
+                {
+                    to_entity_id: PRODUCT_ID,
+                    to_entity_type: "catalog_elements",
+                    metadata: { quantity: quantity, catalog_id: 77598 }
+                }
+            ], { headers: { Authorization: `Bearer ${token}` } });
+        } catch(e) {}
+        console.log("✅ Order Data Linked.");
+    } catch (error) { console.error("⚠️ Order Save Error:", error.message); }
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`🚀 DETECTIVE MODE LISTENING ${PORT}`);
-    try { await getAccessToken(); console.log("✅ Token OK"); } catch (e) { }
+    console.log(`🚀 Copacol Server READY on port ${PORT}`);
+    try { await getAccessToken(); console.log("✅ OAuth Token Verified."); } catch (e) { }
 });
