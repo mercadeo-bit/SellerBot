@@ -1,6 +1,8 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
 import { getAccessToken } from './src/kommoAuth.js';
 import { analizarMensaje } from './src/openaiService.js';
 
@@ -18,9 +20,23 @@ const FIELDS = {
     INFO_ADICIONAL: 2099845, FORMA_PAGO: 2099849, VALOR_TOTAL: 2099863, CEDULA: 2099635
 };
 
+const ID_PIPELINE_MASTERSHOP = 12549896; 
+const ID_STATUS_INICIAL_MASTERSHOP = 96929184;
+const PRODUCT_ID = 1755995; 
+const PRODUCT_PRICE = 319900; 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-app.get('/', (req, res) => res.send('Copacol AI: CONTACT DETECTIVE 🕵️‍♀️'));
+// 📂 LOCAL MEMORY SETUP
+const HISTORY_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH 
+    ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'chat_history.json') 
+    : './chat_history.json';
+
+// Initialize History File
+if (!fs.existsSync(HISTORY_FILE)) {
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify({}));
+}
+
+app.get('/', (req, res) => res.send('Copacol AI: LOCAL MEMORY SYSTEM UP 🧠'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -30,82 +46,153 @@ app.post('/webhook', async (req, res) => {
             const msg = body.message.add[0];
             if (msg.type === 'incoming') {
                 console.log(`\n📨 INCOMING MSG from Lead ${msg.entity_id}`);
-                processDetective(msg.entity_id, msg.text).catch(err => console.error(err));
+                // Only process text messages
+                if(msg.text) {
+                    processSmartFieldReply(msg.entity_id, msg.text).catch(err => 
+                        console.error("❌ Async Process Error:", err.message)
+                    );
+                }
             }
         }
     } catch (err) { console.error('❌ Webhook Error:', err.message); }
 });
 
-async function processDetective(leadId, incomingText) {
+async function processSmartFieldReply(leadId, incomingText) {
     const token = await getAccessToken();
 
-    // 1. GET LEAD & CONTACT ID
-    const leadRes = await axios.get(`https://${API_DOMAIN}/api/v4/leads/${leadId}?with=contacts`, { 
-        headers: { Authorization: `Bearer ${token}` } 
-    });
+    // 1. INFO LEAD
+    const leadRes = await axios.get(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { headers: { Authorization: `Bearer ${token}` } });
     const leadData = leadRes.data;
     
-    // DETECT CONTACT ID
-    let contactId = null;
-    if (leadData._embedded?.contacts?.length > 0) {
-        contactId = leadData._embedded.contacts[0].id;
-        console.log(`👤 FOUND CONTACT ID: ${contactId}`);
-    } else {
-        console.log("⚠️ NO CONTACT FOUND. Messages cannot be retrieved.");
-        return;
+    // SECURITY AUDIT
+    const REQUIRED_PIPELINE = String(process.env.PIPELINE_ID_VENTAS).trim(); 
+    if (String(leadData.pipeline_id) !== REQUIRED_PIPELINE) {
+        console.log(`⛔ SKIP: Pipeline ${leadData.pipeline_id}`);
+        return; 
     }
 
-    // 2. DUMP CONTACT EVENTS (RAW)
-    console.log(`\n🔍 SCANNING CONTACT EVENTS (ID: ${contactId})...`);
-    try {
-        const url = `https://${API_DOMAIN}/api/v4/events?filter[entity]=contact&filter[entity_id]=${contactId}&limit=5`;
-        const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
-        
-        if (res.data?._embedded?.events) {
-            console.log("📦 === CONTACT EVENTS DUMP ===");
-            console.log(JSON.stringify(res.data._embedded.events.slice(0, 3), null, 2));
-            console.log("============================\n");
-        } else {
-            console.log("❌ NO CONTACT EVENTS FOUND.");
-        }
-    } catch(e) { console.error("Event error", e.message); }
+    // 2. 🧠 LOCAL MEMORY MANAGEMENT
+    // Read current history
+    const allHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+    let chatHistory = allHistory[leadId] || [];
 
-    // 3. DUMP CONTACT NOTES (RAW)
-    console.log(`\n🔍 SCANNING CONTACT NOTES (ID: ${contactId})...`);
-    try {
-        const url = `https://${API_DOMAIN}/api/v4/contacts/${contactId}/notes?limit=5`;
-        const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
-        
-        if (res.data?._embedded?.notes) {
-            console.log("📒 === CONTACT NOTES DUMP ===");
-            console.log(JSON.stringify(res.data._embedded.notes.slice(0, 3), null, 2));
-            console.log("===========================\n");
-        } else {
-            console.log("❌ NO CONTACT NOTES FOUND.");
-        }
-    } catch(e) { console.error("Note error", e.message); }
+    // Append USER message (The one that just arrived)
+    // Avoid appending if it's identical to the last user message (Dup check)
+    const lastMsg = chatHistory[chatHistory.length - 1];
+    if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== incomingText) {
+        chatHistory.push({ role: 'user', content: incomingText });
+    }
 
-    // KEEP BOT ALIVE (Standard Reply Logic)
-    // We execute the standard logic just so the bot answers, but the logs above are what matters.
-    const history = []; // Force empty for detective test
-    const aiResponse = await analizarMensaje(history, incomingText);
-    let finalText = aiResponse.content || "...";
-    finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
-    await updateAiResponseField(leadId, finalText, token);
+    // Limit memory to last 10 messages to keep prompt clean
+    if (chatHistory.length > 10) chatHistory = chatHistory.slice(-10);
+
+    console.log(`🧠 Memory Loaded: ${chatHistory.length} messages.`);
+
+    // 3. AI GENERATION
+    const aiResponse = await analizarMensaje(chatHistory, incomingText); // Pass full history
+
+    // 4. SAVE BOT RESPONSE TO MEMORY
+    if (aiResponse.content) {
+        chatHistory.push({ role: 'assistant', content: aiResponse.content });
+        // Save back to file
+        allHistory[leadId] = chatHistory;
+        fs.writeFileSync(HISTORY_FILE, JSON.stringify(allHistory, null, 2));
+    }
+
+    // 5. EXECUTION
+    if (aiResponse.tool_calls) {
+        console.log("🛠️ AI Action: Finalizar Compra");
+        const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
+        await handleOrderCreation(leadId, args, token);
+        
+        const confirmationText = `¡Listo ${args.nombre}! 🎉\n\nTu orden ha sido registrada. Vamos a procesar tu envío a ${args.ciudad}. ¡Gracias por confiar en Copacol! 🙏🏽`;
+        await updateAiResponseField(leadId, confirmationText, token);
+        await triggerSalesbotLoop(leadId, leadData.status_id, token);
+
+        // Move to Mastershop
+        if (ID_PIPELINE_MASTERSHOP !== 0) {
+            console.log(`🚚 MOVING TO MASTERSHOP...`);
+            try {
+                await sleep(3000); 
+                await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+                    pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
+                    status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
+                }, { headers: { Authorization: `Bearer ${token}` } });
+            } catch (e) { console.error("⚠️ Move Error:", e.message); }
+        }
+    } else {
+        // CHAT
+        let finalText = aiResponse.content || "...";
+        finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
+        await updateAiResponseField(leadId, finalText, token);
+        await triggerSalesbotLoop(leadId, leadData.status_id, token);
+    }
 }
 
-// Minimal Utils
+// ---------------------------------------------------------
+// 🛠️ UTILS
+// ---------------------------------------------------------
 async function updateAiResponseField(leadId, text, token) {
     try {
-        const fieldId = parseInt(process.env.FIELD_ID_RESPUESTA_IA);
         await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
-            custom_fields_values: [{ field_id: fieldId, values: [{ value: text }] }]
+            custom_fields_values: [{ field_id: parseInt(process.env.FIELD_ID_RESPUESTA_IA), values: [{ value: text }] }]
         }, { headers: { Authorization: `Bearer ${token}` } });
-    } catch(e) {}
+        console.log(`📝 Field Updated.`);
+    } catch(e) { console.error("❌ Field Update Failed:", e.message); }
+}
+
+async function triggerSalesbotLoop(leadId, currentStatus, token) {
+    const stageEntrada = parseInt(process.env.STATUS_ID_ENTRANTES);
+    const stageCualificando = parseInt(process.env.STATUS_ID_CUALIFICANDO);
+    if (currentStatus == stageCualificando) {
+        console.log("🔙 Loop: Back...");
+        await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { status_id: stageEntrada }, { headers: { Authorization: `Bearer ${token}` } });
+        await sleep(1000); 
+    }
+    console.log("🔫 Loop: Forward...");
+    await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { status_id: stageCualificando }, { headers: { Authorization: `Bearer ${token}` } });
+}
+
+async function handleOrderCreation(leadId, args, token) {
+    try {
+        console.log("📝 Saving Order Data...");
+        const quantity = args.cantidad_productos || 1;
+        const totalValue = quantity * PRODUCT_PRICE;
+
+        const customFields = [
+            { field_id: FIELDS.NOMBRE, values: [{ value: args.nombre }] },
+            { field_id: FIELDS.APELLIDO, values: [{ value: args.apellido }] },
+            { field_id: FIELDS.CEDULA, values: [{ value: args.cedula }] },
+            { field_id: FIELDS.TELEFONO, values: [{ value: args.telefono }] },
+            { field_id: FIELDS.CORREO, values: [{ value: args.email || "noaplica@copacol.com" }] },
+            { field_id: FIELDS.DEPARTAMENTO, values: [{ value: args.departamento }] },
+            { field_id: FIELDS.CIUDAD, values: [{ value: args.ciudad }] },
+            { field_id: FIELDS.DIRECCION, values: [{ value: args.direccion }] },
+            { field_id: FIELDS.INFO_ADICIONAL, values: [{ value: args.info_adicional || "-" }] },
+            { field_id: FIELDS.FORMA_PAGO, values: [{ value: "Pago Contra Entrega (Con recaudo)" }] },
+            { field_id: FIELDS.VALOR_TOTAL, values: [{ value: totalValue }] }
+        ];
+
+        await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
+            price: totalValue, 
+            custom_fields_values: customFields
+        }, { headers: { Authorization: `Bearer ${token}` } });
+        
+        try {
+            await axios.post(`https://${API_DOMAIN}/api/v4/leads/${leadId}/link`, [
+                {
+                    to_entity_id: PRODUCT_ID,
+                    to_entity_type: "catalog_elements",
+                    metadata: { quantity: quantity, catalog_id: 77598 }
+                }
+            ], { headers: { Authorization: `Bearer ${token}` } });
+        } catch(e) {}
+        console.log("✅ Order Data Linked.");
+    } catch (error) { console.error("⚠️ Order Save Error:", error.message); }
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`🚀 CONTACT DETECTIVE READY ${PORT}`);
+    console.log(`🚀 Copacol Server READY on port ${PORT}`);
     try { await getAccessToken(); console.log("✅ Token Verified."); } catch (e) { }
 });

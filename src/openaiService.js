@@ -43,7 +43,7 @@ OBJETIVO: Aliada comercial. Calidez, respeto y transparencia técnica.
 4. **Aliados:** "Estamos para apoyarte", "Nos alegra acompañarte en tu crecimiento".
 
 === PROTOCOLO DE MEMORIA (CRÍTICO) ===
-Analiza el historial ("user" y "assistant").
+Analiza el historial.
 1. **¿ESTAMOS EMPEZANDO?** (Historial vacío o solo 1 mensaje): 
    - SIEMPRE saluda y preséntate: "¡Hola! Mi nombre es Sofía de COPACOL..."
    - LUEGO responde la pregunta del cliente.
@@ -115,13 +115,24 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
         const historyClean = sanitizeMessages(contexto);
         console.log(`🧠 AI Processing... Context size: ${historyClean.length}`);
 
+        // OPTIMIZATION: Check if the user message is ALREADY at the end of the history
+        // to avoid duplicating it (since index.js adds it locally first).
+        let messagesToSend = [
+            { role: "system", content: SYSTEM_PROMPT },
+            ...historyClean
+        ];
+
+        // Only add 'mensajeUsuario' if it's NOT the last message in history
+        if (mensajeUsuario) {
+            const lastMsg = historyClean[historyClean.length - 1];
+            if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== mensajeUsuario) {
+                messagesToSend.push({ role: "user", content: mensajeUsuario });
+            }
+        }
+
         const response = await openai.chat.completions.create({
             model: "gpt-4-turbo",
-            messages: [
-                { role: "system", content: SYSTEM_PROMPT },
-                ...historyClean,
-                ...(mensajeUsuario ? [{ role: "user", content: mensajeUsuario }] : [])
-            ],
+            messages: messagesToSend,
             tools: tools,
             tool_choice: "auto",
             temperature: 0.1,
