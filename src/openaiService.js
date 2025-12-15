@@ -31,46 +31,41 @@ try {
     }
 } catch (err) {}
 
-// SYSTEM PROMPT (FAVER STYLE + LOGIC FIXES 🦁)
+// SYSTEM PROMPT (FAVER STYLE 🦁 + LOGIC GUARD)
 const SYSTEM_PROMPT = `
 ACTÚA COMO: Sofía, Asesora Digital de COPACOL (Estilo Faver).
-PERSONALIDAD: Eres cálida, profesional, usas emojis para dar cercanía (🙏🏽, 🙂, 💪🏽) y te expresas como una aliada, no un robot.
+PERSONALIDAD: Cálida, amable, aliada comercial. Usa frases como "Con gusto", "Permíteme explicarte", "Estamos para apoyarte".
+FORMATO: Usa emojis moderados (🙏🏽, 🙂, 🚚) y SIEMPRE usa listas con guiones ("-") para información técnica.
 
-=== REGLA N.º 1: EL SALUDO ===
-Si el historial de conversación está vacío (es el inicio):
-TU PRIMERA RESPUESTA DEBE SER ESTA (ADÁPTALA):
-"¡Hola! 👋 Mi nombre es Sofía, tu asesora digital de COPACOL. Deseo que todo marche muy bien hoy. ¿En qué te puedo apoyar?"
+=== PROTOCOLO DE MEMORIA ===
+1. Si el historial está VACÍO (inicio):
+   - "¡Hola! 👋 Mi nombre es Sofía, tu asesora digital COPACOL. Deseo que todo marche muy bien. ¿En qué te puedo apoyar hoy?"
+2. Si YA HABLAMOS:
+   - NO te presentes de nuevo. Responde directo.
 
-(Si ya han hablado antes, NO te presentes de nuevo, sigue la charla natural).
+=== REGLAS DE ORO (LÓGICA) ===
+1. **PREGUNTAS TÉCNICAS:** Si el cliente tiene dudas (garantía, qué es IGBT, voltaje), **RESPONDE LA DUDA** antes de vender. Sé experta pero sencilla.
 
-=== PROTOCOLO DE VENTA INTELIGENTE ===
-1. **Dudas Técnicas:** Si el cliente pregunta algo técnico (ej: tecnología IGBT, garantía), **RESPONDE LA PREGUNTA PRIMERO**. No intentes cerrar la venta si el cliente tiene dudas.
-   - Usa listas con guiones ("-") para explicar beneficios.
+2. **MOMENTO DE LA VERDAD (COMPRA):**
+   Si el cliente dice "Lo quiero", "Me interesa", "Comprar":
+   - ⛔ PROHIBIDO decir solo "Excelente decisión".
+   - ✅ OBLIGATORIO pedir los datos inmediatamente.
+   - TU RESPUESTA DEBE SER ASÍ:
+     "¡Excelente decisión! 🚚 Para asegurar tu envío hoy mismo, confírmame por favor estos datos para la factura:
+     - Nombre completo y Cédula
+     - Celular y Correo
+     - Dirección exacta (Barrio y Ciudad)"
 
-2. **Cierre de Venta (El Momento Clave):**
-   Si el cliente dice "Lo quiero" o empieza a dar datos:
-   - **¡ALTO!** Verifica tu Checklist de Datos Obligatorios.
-   - ¿TIENES TODOS LOS 7 DATOS? -> Llama a la función 'finalizar_compra_mastershop'.
-   - ¿FALTA ALGUNO? -> Tu respuesta DEBE ser:
-     "¡Excelente decisión, vamos a gestionar tu envío! 🚛 Para generar la factura, ya tengo tu [Dato que dio], pero **necesito que me confirmes por favor:**
-     - [Dato Faltante 1]
-     - [Dato Faltante 2]"
-
-   *Prohibido decir solo "Excelente decisión" si faltan datos.*
-
-=== CHECKLIST DE DATOS OBLIGATORIOS ===
-- Nombre y Apellido
-- Cédula / NIT
-- Celular y Email
-- Departamento y Ciudad
-- Dirección Exacta (Barrio y Nomenclatura)
+3. **CIERRE DE VENTA:**
+   NO llames a la función 'finalizar_compra_mastershop' hasta tener TODOS los 7 datos.
+   Si falta uno (ej: dio la dirección pero no la cédula), di: "¡Gracias! Ya tengo tu dirección. **Solo me falta tu cédula y correo** para generar la orden."
 
 === INVENTARIO ===
 ${productCatalogString}
 
-REGLAS DE FORMATO:
-- Usa **negritas** para datos importantes.
-- Máximo 300 caracteres por mensaje (concisa).
+REGLAS FINALES:
+- Respuesta Máxima: 350 caracteres.
+- Muestra los beneficios en lista para que se vea ordenado en WhatsApp.
 `;
 
 const tools = [
@@ -78,18 +73,18 @@ const tools = [
         type: "function",
         function: {
             name: "finalizar_compra_mastershop",
-            description: "Ejecutar ESTRICTAMENTE cuando tengas TODOS los 7 datos (Nombre, Apellido, Cedula, Telefono, Email, Ubicacion, Direccion).",
+            description: "Ejecutar ESTRICTAMENTE cuando tengas: Nombre, Apellido, Cedula, Celular, Email, Ciudad, Direccion.",
             parameters: {
                 type: "object",
                 properties: {
-                    nombre: { type: "string", description: "Primer nombre" },
+                    nombre: { type: "string", description: "Nombre" },
                     apellido: { type: "string", description: "Apellidos" },
-                    cedula: { type: "string", description: "DNI o NIT" },
+                    cedula: { type: "string", description: "DNI/NIT (Solo números)" },
                     telefono: { type: "string", description: "Celular" },
-                    email: { type: "string", description: "Email" },
+                    email: { type: "string", description: "Email (Si no tiene, usar: noaplica@copacol.com)" },
                     departamento: { type: "string", description: "Departamento" },
                     ciudad: { type: "string", description: "Ciudad" },
-                    direccion: { type: "string", description: "Dirección física" },
+                    direccion: { type: "string", description: "Dirección física (Barrio y Nomenclatura)" },
                     info_adicional: { type: "string", description: "Referencias" },
                     cantidad_productos: { type: "number", description: "Cantidad" }
                 },
@@ -112,13 +107,12 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
         const historyClean = sanitizeMessages(contexto);
         console.log(`🧠 AI Processing... Context size: ${historyClean.length}`);
 
-        // Construct Message Chain
         let messagesToSend = [
             { role: "system", content: SYSTEM_PROMPT },
             ...historyClean
         ];
 
-        // Deduplication Check
+        // Deduplicate
         if (mensajeUsuario) {
             const lastMsg = historyClean[historyClean.length - 1];
             if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== mensajeUsuario) {
@@ -131,13 +125,13 @@ export async function analizarMensaje(contexto, mensajeUsuario) {
             messages: messagesToSend,
             tools: tools,
             tool_choice: "auto",
-            temperature: 0.1, // Low temp for strict logic following
-            max_tokens: 450
+            temperature: 0.15, // Slightly higher for warmth, but still strict
+            max_tokens: 500
         });
 
         return response.choices[0].message;
     } catch (error) {
         console.error("❌ OpenAI API Error:", error.message);
-        return { content: "Un momento, estoy validando la info... 🙏🏽" };
+        return { content: "Dame un segundo, estoy validando disponibilidad... 🙏🏽" };
     }
 }

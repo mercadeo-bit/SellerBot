@@ -19,10 +19,10 @@ const FIELDS = {
     INFO_ADICIONAL: 2099845, FORMA_PAGO: 2099849, VALOR_TOTAL: 2099863, CEDULA: 2099635
 };
 
-// ⚙️ CONFIGURATION
+// ⚙️ CONFIG (Updated)
 const ID_PIPELINE_MASTERSHOP = 12549896; 
 const ID_STATUS_INICIAL_MASTERSHOP = 96929184;
-const PRODUCT_ID = 1756031; 
+const PRODUCT_ID = 1756031; // ✅ Updated
 const CATALOG_ID = 77598;   
 const PRODUCT_PRICE = 319900; 
 
@@ -35,7 +35,7 @@ const HISTORY_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
 
 if (!fs.existsSync(HISTORY_FILE)) { fs.writeFileSync(HISTORY_FILE, JSON.stringify({})); }
 
-app.get('/', (req, res) => res.send('Copacol AI: FINAL v3.1 UP 🟢'));
+app.get('/', (req, res) => res.send('Copacol AI: v3.2 (Visual Polish) 🟢'));
 
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
@@ -54,28 +54,27 @@ app.post('/webhook', async (req, res) => {
 async function processSmartFieldReply(leadId, incomingText) {
     const token = await getAccessToken();
 
-    // 1. INFO LEAD
+    // 1. LEAD INFO
     const leadRes = await axios.get(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, { headers: { Authorization: `Bearer ${token}` } });
     const leadData = leadRes.data;
     
-    // SECURITY AUDIT
+    // SECURITY CHECK
     const REQUIRED_PIPELINE = String(process.env.PIPELINE_ID_VENTAS).trim(); 
     if (String(leadData.pipeline_id) !== REQUIRED_PIPELINE) {
         console.log(`⛔ SKIP: Pipeline ${leadData.pipeline_id}`);
         return; 
     }
 
-    // 2. MEMORY
+    // 2. MEMORY LOGIC
     const allHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
     let chatHistory = allHistory[leadId] || [];
 
-    // Dedup Input
+    // Dedup
     const lastMsg = chatHistory[chatHistory.length - 1];
     if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== incomingText) {
         chatHistory.push({ role: 'user', content: incomingText });
     }
 
-    // Manage Size
     if (chatHistory.length > 50) chatHistory = chatHistory.slice(-50);
     allHistory[leadId] = chatHistory;
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(allHistory, null, 2));
@@ -98,31 +97,32 @@ async function processSmartFieldReply(leadId, incomingText) {
         const args = JSON.parse(aiResponse.tool_calls[0].function.arguments);
         await handleOrderCreation(leadId, args, token);
         
-        // --- SAFE CONFIRMATION MESSAGE ---
-        const safeName = args.nombre || "Cliente";
-        const safeCity = args.ciudad || "tu ciudad";
-        const safeAddr = args.direccion || "Dirección pendiente";
+        // --- VISUAL CONFIRMATION MESSAGE ---
         const qty = args.cantidad_productos || 1;
         const total = (qty * PRODUCT_PRICE).toLocaleString('es-CO');
-
+        const safeName = args.nombre || "Cliente";
+        
         const confirmationText = `✅ *¡ORDEN GENERADA!* 🚛
         
-Gracias, *${safeName}*. Confirmamos tu pedido así:
+Gracias, *${safeName}*. Hemos confirmado tu pedido exitosamente:
 
-🔹 *Producto:* Soldador Inversor Furius
-🔹 *Cantidad:* ${qty} Und.
-🔹 *Total:* $${total} (Contra Entrega)
-📍 *Enviar a:* ${safeAddr}, ${safeCity}
+📦 *Producto:* Soldador Inversor Furius
+🔹 *Cantidad:* ${qty} Unidad(es)
+💰 *Total:* $${total} (Contra Entrega)
+📍 *Dirección:* ${args.direccion || "N/A"}
+🏙️ *Ciudad:* ${args.ciudad || "N/A"}
 
-En breve te compartiremos la guía de despacho. ¡Gracias por confiar en COPACOL! 🤝`;
+Te notificaremos por aquí cuando salga el despacho con tu número de guía. 
+¡Gracias por confiar en COPACOL! 🤝`;
 
         await updateAiResponseField(leadId, confirmationText, token);
         await triggerSalesbotLoop(leadId, leadData.status_id, token);
 
+        // Move to Mastershop
         if (ID_PIPELINE_MASTERSHOP !== 0) {
             console.log(`🚚 MOVING TO MASTERSHOP...`);
             try {
-                await sleep(3500); // Give time for message to read
+                await sleep(3500); 
                 await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
                     pipeline_id: parseInt(ID_PIPELINE_MASTERSHOP),
                     status_id: parseInt(ID_STATUS_INICIAL_MASTERSHOP)
@@ -130,7 +130,7 @@ En breve te compartiremos la guía de despacho. ¡Gracias por confiar en COPACOL
             } catch (e) { console.error("⚠️ Move Error:", e.message); }
         }
     } else {
-        // CHAT
+        // CHAT RESPONSE
         let finalText = aiResponse.content || "...";
         finalText = finalText.replace(/[\u0000-\u001F\u007F-\u009F]/g, ""); 
         await updateAiResponseField(leadId, finalText, token);
@@ -180,24 +180,27 @@ async function handleOrderCreation(leadId, args, token) {
             { field_id: FIELDS.VALOR_TOTAL, values: [{ value: totalValue }] }
         ];
 
-        // 1. Update Lead
+        // 1. UPDATE FIELDS
         await axios.patch(`https://${API_DOMAIN}/api/v4/leads/${leadId}`, {
             price: totalValue, 
             custom_fields_values: customFields
         }, { headers: { Authorization: `Bearer ${token}` } });
         
-        // 2. Link Catalog
+        // 2. LINK CATALOG ITEM
         try {
             await axios.post(`https://${API_DOMAIN}/api/v4/leads/${leadId}/link`, [
                 {
                     to_entity_id: PRODUCT_ID,
                     to_entity_type: "catalog_elements", 
-                    metadata: { quantity: quantity, catalog_id: CATALOG_ID }
+                    metadata: {
+                        quantity: quantity,
+                        catalog_id: CATALOG_ID
+                    }
                 }
             ], { headers: { Authorization: `Bearer ${token}` } });
             console.log(`✅ Product ID ${PRODUCT_ID} Linked.`);
         } catch(linkErr) {
-            console.error("⚠️ Catalog Link:", linkErr.response?.data || linkErr.message);
+            console.error("⚠️ Catalog Link Failed:", linkErr.response?.data || linkErr.message);
         }
         
     } catch (error) { console.error("⚠️ Order Save Error:", error.message); }
